@@ -1,0 +1,25 @@
+host-side syntax check + virtual alphabot simulation (not robot code)
+sketch : lab1_stage1_motor_test/lab1_stage1_motor_test.ino (unchanged, compiles against the mock)
+note   : folder moved from C:\4work\study\ISS\LAB1 to C:\4work\study\ISS\LAB\LAB1
+
+syntax check only:
+  g++ -std=c++11 -Wall -Wextra -I_hostcheck -include _hostcheck/Arduino.h -x c++ ^
+      lab1_stage1_motor_test/lab1_stage1_motor_test.ino _hostcheck/main.cpp -o _hostcheck/test.exe
+
+full simulation (virtual alphabot physics + scripted serial scenarios):
+  build: g++ -std=c++17 -Wall -I_hostcheck -include _hostcheck/Arduino.h -x c++ ^
+      lab1_stage1_motor_test/lab1_stage1_motor_test.ino _hostcheck/sim_main.cpp -o _hostcheck/sim.exe
+  run:   _hostcheck/sim.exe
+  result: 26/26 PASS (direction check x6 modes, dead band search, coast 38mm vs brake 5mm
+          run-on, garbage input ignored)
+
+sim internals (Arduino.h):
+  - virtual alphabot model lives IN Arduino.h so the .ino TU links against it
+  - all mutable sim state is `inline` (C++17), NOT static - static gives each TU its own
+    copy and the sim silently reads a different world than the sketch writes (cost an afternoon)
+  - channel B nominal forward = IN3=0/IN4=1 per the guide's table (swapping = wheels fight)
+  - model params at top of Arduino.h: WHEEL_D_MM, TRACK_MM, SLOTS, DEADBAND_PWM, ASYM_R...
+    replace with academy measurements as they are taken
+
+hint: two msys64 installs on PATH (C:\msys64 and C:\STM32\msys64) - if g++ exits 1 with no
+      output, run with PATH="/c/msys64/ucrt64/bin:$PATH" first
