@@ -107,9 +107,11 @@ int main() {
     float got = -9999;
     parseTurn(ans, got);
     char name[128];
-    // tolerance = 1 encoder count in body-degrees (spin: 2k/b) + margin - tighter than
+    // tolerance = 1 encoder count in body-degrees + margin - tighter than
     // that is physically impossible (guide p.23: 15 deg lies AT the resolution limit)
-    double oneCntDeg = 2.0 * 5.1087 / sim::TRACK_MM * 57.29578;
+    // basis = the SKETCH's spin track (151, from its greeting line): got= is odometry
+    // at the sketch's b, so the quantisation window must use the sketch's b too
+    double oneCntDeg = 2.0 * 5.1087 / 151.0 * 57.29578;
     double tol = oneCntDeg + 0.6;
     snprintf(name, sizeof name, "%s spin: got=%.1f (cmd %.0f +-%.1f = 1 count)", c.cmd, got, c.deg, tol);
     bool signOk = c.cmd[0] == 'L' ? got > 0 : got < 0;
