@@ -5,3 +5,6 @@ run,gain,dir,cmd,got,L_cnt,R_cnt,odo_L,odo_R,tape_x,tape_y,volt,notes
 4,man,fwd,,,81,137,413.8,699.9,,,,"T2 airborne ~2s drive from zero: R/L=1.69; FAULT:L/R"
 5,man,fwd,,,72,128,367.8,653.9,,,,"T2 airborne burst: R/L=1.78; FAULT:L/R"
 6,man,fwd,,,71,129,362.7,659.0,,,,"T2 airborne, labeled '10s drive' but only ~1.8s of counts (510.9mm, identical to burst-5 delta): R/L=1.82; duration discrepancy unresolved; FAULT:L/R"
+7,6,fwd,300,296.3,54,62,275.9,316.7,,,,"TestD F300 K6: R/L=1.15; rem 3.7 on tick grid; encoder apparently fixed pre-run"
+8,6,fwd,500,493.0,95,98,485.3,500.7,,,,"TestD F500 K6: R/L=1.03; rem 7.0 on grid; closes K6-got TODO; settled +505.7mm (97/101 cnt)"
+9,0,fwd,500,,,,,,,,,"3x stall-abort at start: pwm 85/85, prog=0.0 for 1500ms, watchdog abort, cumulative unchanged; suspect pack sag raised breakaway above PWM_MIN"

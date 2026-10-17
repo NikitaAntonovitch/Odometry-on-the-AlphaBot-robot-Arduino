@@ -117,6 +117,51 @@ the equilibrium prediction working and the Table 1 "measured 2 cnt" was the
 same quantity quantised; a settling well above 3 mm supports the
 dead-band/asymmetry hypothesis instead.
 
+### 5.4a Model predictions for the symmetry-gain sweep (PRED)
+
+> **Everything in this section is PRED** — model output from REAL-calibrated
+> constants, provided because the K0/K3 sweep is postponed (pack discharged,
+> session row 9). Measured column: **TODO pending battery recharge**. No PRED
+> value enters session.csv or any measurement table cell.
+
+**Constants used (all REAL-calibrated):** k = 5.1087 mm/cnt; cruise 302 mm/s
+@ pwm 130; PWM_MIN 85; dead band ≈ 75; CORR_MAX 30; loop tick ~10 ms
+(~3.0 mm/tick at cruise); stop rem grid {0.9, 3.9, 6.9, 9.9} mm; DEC_MM 60,
+decel pwm = 85 + 45·(rem/60); coast run-on +7.7 mm (measured, row 2);
+v5 start-kick 200 ms @ 140 (patch pending).
+
+**Table P1 — parameter-free predictions (F500, any K):** every value PRED
+from code structure + calibrated constants.
+
+| quantity | PRED |
+|---|---|
+| got= | 490–499 mm |
+| err | ∈ [−10, −1] mm, tick-quantised |
+| settled run-on | +8 mm (measured anchor +7.7, row 2) |
+| drive duration | ~2.0 s |
+| start pwm sequence | 85 → kick 140 → 130 |
+| per-wheel mean counts | ~97–98 |
+
+**Table P2 — parametric predictions.** Model: raw wheel split g = right/left
+speed ratio; d(err)/ds = −(g−1) along the path; equilibrium correction
+c\* = 55·(g−1)/(g+1) PWM; steady-state residual = c\*/K. Every value PRED.
+
+| g | K0 end diff | K3 residual | K6 residual | K0 pwm split | K3 pwm split | K6 pwm split |
+|---|---|---|---|---|---|---|
+| 1.05 | −25 mm | −0.4 mm | −0.2 mm | 130/130 flat | ±1–3 | ±2–6 |
+| 1.10 | −50 mm | −0.9 mm | −0.4 mm | 130/130 flat | ±1–3 | ±2–6 |
+| 1.15 | −75 mm | −1.3 mm | −0.6 mm | 130/130 flat | ±1–3 | ±2–6 |
+
+(End diff at K0 = full uncorrected asymmetry; K3/K6 residuals sit at
+equilibrium; pwm split is the mid-run corr signature "if corr healthy".)
+
+**Anchor paragraph:** "Measured K6 F500 (session row 8) gives L-R = -15.3 mm,
+25-70x above prediction. A working K6 controller cannot rest at -15 mm (equilibrium
+would require corr = 92 PWM, above the 30 clamp). Two open hypotheses: (a) corr not
+applied - signature: pwmL/pwmR = 130/130 flat throughout telemetry; (b) residual
+left-encoder bias ~3% - signature: corr active (+/-2-6 PWM) while counts still end
+near -3 counts. The telemetry K sweep decides between them."
+
 ### 5.5 Controller error vs scale error (Table 4) — decomposition + TODO cells
 
 > The guide's point (p.21): commanded vs odometry ("did the robot reach its
@@ -180,6 +225,14 @@ telemetry re-run; (3) tape measurements are postponed, all tape cells remain TOD
 (4) the distance-control machinery itself validated independently of the fault: stop
 window got=490.4 mm in [490,495] (err -9.6 mm), deceleration profile pwm 123 @ rem 50.4
 and 106 @ rem 27.4 matching 85+45*(rem/60), coast run-on reduced to +7.7 mm.**
+
+**Status update (same session): After connector reseating, two K6 runs (F300 got=296.3 mm,
+R/L=1.15; F500 got=493.0 mm, R/L=1.03) show near-equal wheel odometry, consistent with
+restoration of the left encoder. Formal confirmation (hand-push before/after pair) and
+the telemetry controller-alive check remain outstanding. The battery pack discharged late
+in the session (three start-stall aborts at PWM_MIN=85, session row 9), postponing the
+K0/K3 sweep and tape metrology; model predictions for the pending sweep are provided in
+the PRED section.**
 
 The robot measurement session is **deferred**; this skeleton carries real data
 from past sessions only. Exactly what remains: **K6 ×2 runs** (Table 1 row +

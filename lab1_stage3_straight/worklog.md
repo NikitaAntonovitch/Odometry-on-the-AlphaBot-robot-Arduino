@@ -1,5 +1,40 @@
 # DATA-XFER-1 — Stage 3 v4 session data entry (17.10, desk)
 
+## Task ID: PRED-XFER-1 — model-prediction section + session rows 7-9 (17.10, desk)
+
+**Scope:** append real session rows 7-9, add the PRED section 5.4a for the
+pending K sweep, close exactly one TODO (K6 got=). No sketch changes, no
+fabrication.
+
+**session.csv:** rows 7-9 appended (REAL transcriptions):
+- row 7: TestD F300 K6, got=296.3, R/L=1.15 — encoder apparently fixed pre-run
+- row 8: TestD F500 K6, got=493.0, R/L=1.03 — closes the K6-got TODO;
+  settled +505.7 mm (97/101 cnt)
+- row 9: K0 F500 — 3x start-stall abort (pwm 85/85, prog 0.0 for 1500 ms,
+  watchdog); pack sag suspected; no got, no counts
+
+**stage3_tables.py:** unchanged; re-run on the 9-row session —
+- rows 1-6 still FAULT-excluded (excluded list unchanged)
+- row 7: err=-3.7 -> OUTSIDE [-10,-6] window (rem 3.7 on tick grid - stop fired
+  in the same step past the edge; consistent, not a bug)
+- row 8: err=-7.0 -> IN window ✓; R/L=1.03
+- row 9: empty got/counts -> skipped by the existing guards, no crash
+- aggregates: 3 clean rows eligible (7, 8 + none other with tape) - none carry
+  tape, so Tables 2/4 remain TODO
+
+**Report (S5_ASSEMBLED):** new subsection **5.4a "Model predictions for the
+symmetry-gain sweep (PRED)"** inserted between 5.4 and 5.5 - constants block,
+Table P1 (parameter-free), Table P2 (parametric g sweep), anchor paragraph on
+the row-8 residual (-15.3 mm, 25-70x above PRED; hypotheses (a) corr-not-
+applied vs (b) ~3% left-encoder bias; telemetry sweep decides). Limitations:
+"Status update (same session)" paragraph appended verbatim.
+
+**TODO inventory:** K6-got item CLOSED (row 8); everything else open,
+unchanged. PRED values confined to section 5.4a - session.csv and all
+measurement cells untouched by them.
+
+# DATA-XFER-1 — Stage 3 v4 session data entry (17.10, desk)
+
 ## Task ID: DATA-XFER-1
 
 **Scope:** data entry + honest flagging only. No sketch changes, no data
@@ -71,16 +106,28 @@ rows total: 6   REAL: 6   clean (aggregate-eligible): 0   FAULT-excluded: 6
 - run 1 got= (serial scrollback), all tape_x/tape_y, all volt, the 4th gain,
   telemetry re-runs (T3), hand-push discriminator test
 
-## Open TODO inventory (unchanged, nothing closed)
-- K6 done line (got=) — recover from serial scrollback if user provides it
-- Hand-push encoder test (decisive motor-vs-encoder discriminator) — pending
-- "10s drive" duration confirmation — pending
-- T3: K6 F500 with telemetry (pwmL/pwmR split vs 130/130) — pending
-- Post-fix encoder re-verification burst (expect R/L ~1.0) — pending
-- All tape_x/tape_y and volt logging — postponed until fault resolved
+## Open TODO inventory (updated PRED-XFER-1)
+
+**CLOSED (PRED-XFER-1):**
+- ~~K6 got= recoverable from serial scrollback~~ → CLOSED: session row 8, got=493.0 mm (F500 K6, err −7.0 in window)
+
+**Open (unchanged by PRED-XFER-1):**
+- Hand-push encoder test (decisive motor-vs-encoder discriminator) — pending; now also
+  the *formal confirmation* of the apparent post-reseat fix (rows 7–8 show R/L 1.15/1.03)
+- "10s drive" duration confirmation — pending (rows 4–6 remain FAULT-flagged)
+- T3: K6 F500 with telemetry (controller-alive check: pwmL/pwmR split vs 130/130) —
+  pending; decides anchor hypotheses (a)/(b) of the PRED section
+- K0/K3 sweep + tape metrology — postponed (pack discharged, row 9; three start-stall
+  aborts at PWM_MIN 85); PRED section 5.4a holds the model predictions meanwhile
+- Post-fix encoder re-verification burst (expect R/L ~1.0) — partially satisfied by
+  rows 7–8 (1.15/1.03), formal pair still outstanding
+- All tape_x/tape_y and volt logging — postponed
+- v5 start-kick patch (200 ms @ 140, row 9 evidence: breakaway above PWM_MIN under sag)
+  — pending sketch change (NOT part of DATA-XFER-1/PRED-XFER-1)
 
 ## Not touched
 - the .ino sketch, controller/ISR/parser code: **no changes**
-- REPORT_STAGE3*.md existing REAL/PRED/TODO markers: **preserved**; the
-  limitations paragraph was inserted as new text without altering existing
-  sections
+- stage3_tables.py check logic: **no changes** (new rows flow through the existing
+  checks; run 7 correctly lands OUTSIDE the [-10,-6] window at err −3.7 — closer than
+  one tick past the stop edge, consistent with rem 3.7 on the tick grid)
+- all pre-existing REAL/PRED/TODO markers: **preserved**
