@@ -1,3 +1,29 @@
+# STAGE4-PREP-1 — MEASURE_STAGE4 session-readiness patch (17.10, desk)
+
+**Scope:** stage-4 worksheet only, per STAGE4-AUDIT-1 findings 1/4/8 ("must
+be added to MEASURE_STAGE4 before the session"). No sketch changes, no data.
+
+1. **§0 pre-flight gate (NEW):** encoder hand-push R/L≈1.0 formal pair
+   (rows 7-8 gave 1.15/1.03 — this closes the informal status), fresh pack
+   (row 9: 3× start-stall at PWM_MIN 85 under sag — abort, don't push
+   through), greeting check (`stage4 v3: k=5.109 spin=151 pivot=145 [prov]`
+   = flashed binary matches constants under test), floor area + start mark.
+2. **§1a confirmation protocol (NEW):** 1440° ×3/dir table (got= +
+   protractor columns), gate clauses from SIM_PREFILL §G row 2 verbatim
+   (E +4…+8 both dirs, same sign, σ ≤ 1.5, L/R within 2°), expected E ≈
+   +5.8 (run-on only), naive b=150.4 explicitly barred from re-introduction,
+   fail path = record-and-stop (no ad-hoc constant edits).
+3. **§1 SUPERSEDED banner:** stale b=160 base and single L/R pair marked
+   obsolete — history kept for the derivation record.
+4. **§7 tangent cross-bar method (NEW):** 45° is OUT-OF-SAMPLE for the
+   {90°,1440°} fit; independent geometry truth at L=1 m (17.5 mm ≈ 1°,
+   reference chords 268/577/1000 mm for 15/30/45°, sensitivities
+   18.7/23.3/34.9 mm/deg), 3-rep table, verdict |got − θ| ≤ 2.25°, offset
+   direction read as the run-on signature.
+
+**Not touched:** the .ino, REPORT_STAGE4.md blanks (they fill AFTER the run,
+from §1a/§7 data — not pre-filled), SIM_PREFILL (gates quoted, not edited).
+
 # DATA-XFER-1 — Stage 3 v4 session data entry (17.10, desk)
 
 ## Task ID: PRED-XFER-1 — model-prediction section + session rows 7-9 (17.10, desk)
