@@ -167,7 +167,7 @@ static uint32_t lastTelMs = 0;
    (no progress -> pwm never rises). '0' stops the manual mode */
 static bool  manualOn = false;
 static int8_t manualDir = +1;
-static int   curPwm = PWM_MIN;
+static int   curPwm = 130;           // run-on test default: cruise duty, settle, then c/b and watch
 
 void stopMotion() {                  // cut the drive, freeze the state, one line stays printable
   brake();                           // dynamic brake, not coast: run-on after V_FLOOR is tiny
@@ -441,7 +441,7 @@ void setup() {
   pinMode(PIN_CNTR, INPUT_PULLUP);
   coast();
   Serial.begin(SERIAL_BAUD);
-  Serial.println(F("== lab1 stage3: straight-line controller =="));
+  Serial.println(F("== lab1 stage3 v4: K_SYM=3 PWM_MIN=85 settled-odom patch =="));
   attachInterrupt(digitalPinToInterrupt(PIN_CNTL), isrL, CHANGE);
   attachInterrupt(digitalPinToInterrupt(PIN_CNTR), isrR, CHANGE);
   Serial.println(F("h = menu"));
@@ -471,6 +471,18 @@ void loop() {
   // snapshot when the counting window closes (stage 2 logic, unchanged)
   static bool wasCounting = true;
   bool nowCounting = encCounting();
-  if (wasCounting && !nowCounting) snapshotEncoders();
+  if (wasCounting && !nowCounting) {
+    snapshotEncoders();
+    // window just closed: one settled-odometry line from the frozen snapshot,
+    // mean of the two wheels in mm - the final travel the coast window counted
+    float settled = 0.5f * ((float)snapL + (float)snapR) * K_MM;
+    Serial.print(F("settled odom="));
+    Serial.print(settled, 1);
+    Serial.print(F("mm L="));
+    Serial.print((long)snapL);
+    Serial.print(F("cnt R="));
+    Serial.print((long)snapR);
+    Serial.println(F("cnt"));
+  }
   wasCounting = nowCounting;
 }
