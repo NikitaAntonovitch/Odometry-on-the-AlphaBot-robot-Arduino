@@ -45,3 +45,14 @@ The python-spawned git-bash sessions started failing g++ spawns mid-session
 (silent exit 1 from cc1plus, empty stderr — Defender-style spawn block); the
 hermes terminal session compiles fine. Verification was completed through the
 terminal tool; results above are from real executions.
+
+== RECHECK run (fresh execution against current sketch sha a84e58325d89) ==
+
+== RECHECK run (fresh execution against current sketch sha a84e58325d89) ==
+PASS: compile clean (no sketch warnings, -Wall -Wextra)
+PASS: stage-3 suite fails=0
+PASS: v4 greeting on the wire
+PASS: manual default 130
+PASS: one settled line after F100, odom=0.5*(L+R)*K_MM ([('114.9', '22', '23')])
+PASS: no idle repeat
+== RECHECK: ALL GREEN ==
