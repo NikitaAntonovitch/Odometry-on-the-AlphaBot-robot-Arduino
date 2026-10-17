@@ -1,0 +1,47 @@
+# Stage 3 sketch v4 — ad-hoc verification log (17.10)
+
+> Scope: the three v4 patches only (greeting, settled-odom line, manual default
+> 130). NOT the canonical suite — no Arduino/AVR toolchain on this PC; "compiles
+> clean for UNO" is host g++ (MSYS2 16.1, -Wall -Wextra) cross-compile against
+> the virtual-robot harness, the same check every prior stage passed before
+> flashing. All runs: `fails=0`.
+
+## 1. Compile
+
+- host g++ -Wall -Wextra, sketch + sim_stage3.cpp: **no warnings from the
+  sketch** (only pre-existing harness warnings in Arduino.h/sim_stage3.cpp).
+
+## 2. Greeting identity (patch 1)
+
+Boot output line 1: `== lab1 stage3 v4: K_SYM=3 PWM_MIN=85 settled-odom patch ==`
+— PASS (grep on the suite boot capture).
+
+## 3. Settled-odom line (patch 2) — probe p3mini (tick pattern with physics)
+
+| probe | capture | verdict |
+|---|---|---|
+| after manual `1`+`0`, window closes | `settled odom=17.9mm L=3cnt R=4cnt` | 0.5·(3+4)·5.1087 = 17.88 → 17.9 ✓ |
+| after F100 drive + coast window | `done cmd=+100.0mm got=92.0mm err=-8.0mm L=18cnt R=18cnt` then `settled odom=114.9mm L=22cnt R=23cnt` | 0.5·(22+23)·5.1087 = 114.95 → 114.9 ✓; got= 92.0 inside the code-structural window [90, 95] ✓ |
+| idle 1 s after | *(no settled line)* | prints once per window close, does not repeat ✓ |
+
+Side observation (REAL, sim): settled 114.9 − got 92.0 = **22.9 mm of coast
+run-on counted after brake()** at the F100 profile — exactly the quantity the
+v4 patch was built to expose for report §5.6; on the real robot this number
+is the tape-measurement cross-check.
+
+## 4. Manual default duty (patch 3)
+
+`1` with no `+`/`−` first → `manual fwd pwm=130` — PASS.
+
+## 5. Regression
+
+Full stage-3 suite (sim_stage3.cpp): **25 PASS, fails=0** — no regressions
+from the patches (controller, parser, abort, bench, scale-error separation
+all green).
+
+## Environment note
+
+The python-spawned git-bash sessions started failing g++ spawns mid-session
+(silent exit 1 from cc1plus, empty stderr — Defender-style spawn block); the
+hermes terminal session compiles fine. Verification was completed through the
+terminal tool; results above are from real executions.
