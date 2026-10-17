@@ -1,0 +1,7 @@
+run,gain,dir,cmd,got,L_cnt,R_cnt,odo_L,odo_R,tape_x,tape_y,volt,notes
+1,6,fwd,500,TODO,75,118,383.2,602.8,,,,"K6 F500 floor; done line not captured (may be recoverable from serial scrollback); settled odom 493.0mm; no telemetry; FAULT:L/R"
+2,0,fwd,500,490.4,68,124,347.4,633.5,,,,"K0 F500 floor; tel from prog~150: err=-0.59*prog linear; pwm flat 130; decel pwm 123@rem50.4 and 106@rem27.4 match 85+45*(rem/60); settled +498.1mm; coast run-on +7.7mm (was ~+45mm pre-patch); FAULT:L/R"
+3,man,fwd,,,128,200,653.9,1021.7,,,,"floor manual, two bursts pwm130 + brake; settled +837.8mm; FAULT:L/R"
+4,man,fwd,,,81,137,413.8,699.9,,,,"T2 airborne ~2s drive from zero: R/L=1.69; FAULT:L/R"
+5,man,fwd,,,72,128,367.8,653.9,,,,"T2 airborne burst: R/L=1.78; FAULT:L/R"
+6,man,fwd,,,71,129,362.7,659.0,,,,"T2 airborne, labeled '10s drive' but only ~1.8s of counts (510.9mm, identical to burst-5 delta): R/L=1.82; duration discrepancy unresolved; FAULT:L/R"

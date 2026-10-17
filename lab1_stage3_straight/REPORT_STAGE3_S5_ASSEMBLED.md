@@ -166,6 +166,21 @@ the magnitude is unverified; the deferred session's F500 tape runs close it.
 
 ### 5.7 Limitations
 
+**Session incident (unresolved): In the first v4 hardware session a systematic odometry
+split appeared: R/L = 1.56-1.82 in every run, both on the floor and with wheels off the
+ground (airborne), excluding floor effects (traction, caster skid). Two candidates remain:
+(a) left motor slower at equal PWM; (b) left encoder undercounting. A decisive hand-push
+test (motors off, robot pushed straight ~0.5 m, encoders counted) was defined but not yet
+executed. Historical evidence - Stage 4 calibration residual +6%, Stage 3 tape-vs-odometry
+agreement within +/-8.5 mm - shows both encoders were healthy in earlier sessions, so the
+fault arose between sessions or during handling. Consequences: (1) rows tagged FAULT:L/R
+are excluded from aggregate tables; (2) symmetry-gain effectiveness is unresolved - the K6
+run showed no measurable correction (R/L 1.57 vs 1.56 without control), pending a
+telemetry re-run; (3) tape measurements are postponed, all tape cells remain TODO;
+(4) the distance-control machinery itself validated independently of the fault: stop
+window got=490.4 mm in [490,495] (err -9.6 mm), deceleration profile pwm 123 @ rem 50.4
+and 106 @ rem 27.4 matching 85+45*(rem/60), coast run-on reduced to +7.7 mm.**
+
 The robot measurement session is **deferred**; this skeleton carries real data
 from past sessions only. Exactly what remains: **K6 ×2 runs** (Table 1 row +
 symptom); **K0/K3 ×3 taped F500 runs** (Tables 2 and 4, one session serves
