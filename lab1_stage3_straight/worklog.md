@@ -131,3 +131,56 @@ rows total: 6   REAL: 6   clean (aggregate-eligible): 0   FAULT-excluded: 6
   checks; run 7 correctly lands OUTSIDE the [-10,-6] window at err −3.7 — closer than
   one tick past the stop edge, consistent with rem 3.7 on the tick grid)
 - all pre-existing REAL/PRED/TODO markers: **preserved**
+
+## Task ID: STAGE4-AUDIT-1 — read-only fact-check of the Stage 4 outstanding-work line (17.10)
+
+Claim audited: "1440 deg x3/dir, accuracy tables, pivot, 45 deg confirmation, 12 report
+blanks — all await the next session". READ-ONLY: no file modified. Evidence per check:
+
+1. **1440 ×3/dir — CORRECTED (split verdict).** n=3/dir IS specified with acceptance
+   ranges (REPORT_STAGE4_SIM_PREFILL.md §G row 2: "1440° ×3 L + ×3 R, cruise | E +4…+8
+   both dirs, same sign, σ ≤ 1.5, L/R means within 2°" — the σ≤1.5 clause is the
+   dispersion rationale; the same-sign clause is the CW/CCW asymmetry check; the sketch
+   comment carries "expected E(1440deg) = +4..+8 after entry. Confirm with 1440deg x3/dir").
+   BUT the post-fix collapse arithmetic (1440 × 0.059 = 85° removed by the scale fix →
+   expect ~+5° = run-on only) is stated only as the +4…+8 range — the explicit
+   "+90 → ~+5" derivation is not written anywhere. MEASURE_STAGE4.md sec.1 still plans a
+   SINGLE L1440/R1440 pair (no ×3, no dispersion rationale) and uses the stale b=160 base
+   ("160.0 × f").
+2. **Accuracy tables — blank count WRONG.** True count: **25 empty table cells + 20
+   inline ______ blanks = 45**, not 12. (The 12 figure was a stale count of the literal
+   "______" matches in an earlier grep, under-counting table cells.) Full enumeration
+   below in the audit output.
+3. **Pivot — CORRECTED (split).** TRACK_PIVOT=145 IS in the sketch (lines 34, 611
+   greeting) and in SIM_PREFILL (§A, §G rows 3/6: pivot 360° L+R @145, pivot 15/30 ×5 ×2
+   dirs, skid note in D.3). NOT in REPORT_STAGE4.md (no 145/TRACK_PIVOT/skid mention) —
+   the plain report skeleton predates the pivot-track decision.
+4. **45° tangent method — MISSING from all Stage 4 files.** No tangent cross-bar method,
+   no L=1m checkpoints (15°→268 mm, 30°→577 mm, 45°→1000 mm), no sensitivities
+   (18.7/23.3/34.9 mm/deg — arithmetic verified correct), no OUT-OF-SAMPLE flag for 45°
+   (absent from the calibration fit {90°, 1440°}). §G row 5 has only "45° combined ≤
+   2.25" (5% rule). The method must be added to MEASURE_STAGE4 before the session.
+5. **Blank count: 45 true (25 table + 20 inline), not 12.** See enumeration.
+6. **Constants consistency — CONFIRMED clean.** trackMm=151.0f / trackMmPivot=145.0f
+   (sketch lines 33-34), 151/145/1.059/+4.7/3.88/±1.94 all identical in SIM_PREFILL §A/§B
+   and the calibration record; worklog.md contains no 144 reference; sketch has no stale
+   144 (line 66 ANG_MAX_DEG=1440 is the angle limit, not a track). grep "144\b" over the
+   sketch hits only ANG_MAX_DEG.
+7. **got= self-consistency — CONFIRMED.** Single source: getTrack(bool pivot) at
+   lab1_stage4_turns.ino line 167; wheelTargetMM (lines 182-183), progressDeg/
+   turnAchievedDeg (lines 191-193), oneCntDeg (310), profile speed (385/390/399) all
+   route through it; J<mm> setter writes trackMm/trackMmPivot (485/488) with the mode
+   labelled in the confirm line. No duplicated track literal in any angle path.
+8. **Pre-flight preconditions — MISSING (as the audit anticipated):** neither
+   MEASURE_STAGE4 nor SIM_PREFILL requires the encoder-health hand-push (R/L ≈ 1.0)
+   as a gate before Stage 4 runs, nor volt logging despite session row 9 (3x start-stall
+   at PWM_MIN=85 on a sagged pack). Stage 4 accuracy is void if the left encoder
+   undercounts (rows 1-6 incident).
+
+**Corrected outstanding-work line:** "pre-flight: encoder hand-push R/L≈1.0 + charged
+pack w/ volt log; then 1440° ×3/dir (E +4…+8, σ≤1.5, L/R within 2°), accuracy tables
+15/30/45/90 × L/R × 5, pivot 15/30 + 360° @145, 45° tangent cross-bar (needs adding to
+MEASURE_STAGE4: 268/577/1000 mm @ L=1 m, OUT-OF-SAMPLE flag), 45 blank cells (25 table +
+20 inline) — all await the next session"
+
+**Status: READ-ONLY audit — no project file modified by this task.**
