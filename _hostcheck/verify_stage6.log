@@ -1,40 +1,29 @@
 stage6 v1 verification log — 20.10, desk (no robot; simulation + diff + syntax)
 ===============================================================================
 
+AD-HOC VERIFICATION (scripted re-run, hermes-verify-stage6.sh, exit 0)
+  checks_failed=0 across 6 checks:
+  1. identity diff stage6 vs stage5, CODE lines only (comments stripped):
+     zero code delta — header/menu/greeting comments differ by design
+     (re-identification). NOTE: first attempt diffed comment lines too and
+     false-FAILed on the header block; the check was fixed to strip // lines.
+  2. build stage6 sketch + stage5 sim suite: clean
+  3. suite vs stage6 sketch: 33 PASS / 0 FAIL, exit 0 ("finished, fails=0")
+  4. syntax-only -Wall -Wextra stage6 .ino: no diagnostics
+  5. stage6_process.py: example path OK ([EXAMPLE] marked); argparse path OK
+     (perfect run x3 = (10,0) -> spread 0, scale +0.00 %)
+  6. regression: stage5 suite vs stage5 sketch itself: fails=0
+
 SCOPE
   stage 6 = stage 5 program re-identified (guide: "nothing new to write beyond
   merging stages 1-5"). No logic changes were made; verification proves the
   identity claim, not new behaviour.
 
-1. IDENTITY PROOF
-  diff of stage5 vs stage6 .ino with identity lines filtered
-  (grep -v -i "stage[56]") -> EMPTY diff: logic, constants, parser, queue,
-  controllers all byte-identical. Only differences: header comment block,
-  greeting string ("stage6 v1: A-B autonomous | G/L/R protocol | ..."),
-  menu line ("== stage6 A-B drive: ... ==").
-
-2. SIM SUITE (stage5 suite against the stage6 sketch)
-  build : g++ -std=c++17 -I_hostcheck -include _hostcheck/Arduino.h -x c++
-          lab1_stage6_autonomous/lab1_stage6_autonomous.ino
-          _hostcheck/sim_stage5.cpp -o _hostcheck/sim6.exe   -> clean
-  run   : 33 checks PASS, 0 FAIL, exit 0, "finished, fails=0"
-  (checkpoint-5 behaviour incl. one-string sequence, skip rule, sign rules,
-  range handling, queue/abort - all inherited unchanged)
-
-3. SYNTAX -Wall -Wextra
-  stage6 .ino: no diagnostics (only pre-existing harness warning in
-  Arduino.h sim::handTurn - unused remL/remR, harness file, not sketch code)
-
-4. TOOLS
-  tools/stage6_process.py: lint clean; example run prints the phase-3 table
-  (mean shift / sigma split, systematic-vs-random verdicts, odometry-vs-tape
-  scale line, paste-ready conclusions block). Marked [EXAMPLE] - not evidence.
-
-5. REAL-ROBOT SCOPE (tomorrow's session, per MEASURE_STAGE6.md)
+REAL-ROBOT SCOPE (tomorrow's session, per MEASURE_STAGE6.md)
   - test area + start-mark prep, RX-buffer math (15 B < 64 B, variant B queue)
   - phase 1 route building, phase 2 x3 one-string runs, phase 3 processing
   - pre-flight gate rides on stage 5 §0 (hand-push R/L 0.95..1.05, charged
     pack, greeting check)
   - stage 5 worksheet runs first on the same charge if time allows (deadline)
 
-VERDICT: stage 6 desk-side READY. Robot evidence pending the session.
+VERDICT: stage 6 desk-side READY (ad-hoc verified). Robot evidence pending.
