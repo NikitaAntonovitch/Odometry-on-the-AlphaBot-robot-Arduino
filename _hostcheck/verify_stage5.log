@@ -1,0 +1,64 @@
+stage5 v1 verification log — 17.10, desk (no robot; simulation + syntax only)
+==============================================================================
+
+BUILD
+  toolchain : /c/msys64/ucrt64/bin/g++ -std=c++17 (absolute path; bare g++ breaks
+              on the dual-MSYS2 PATH clash)
+  command   : g++ -std=c++17 -I_hostcheck -include _hostcheck/Arduino.h -x c++
+              lab1_stage5_protocol/lab1_stage5_protocol.ino _hostcheck/sim_stage5.cpp
+              -o _hostcheck/sim5.exe
+  result    : clean compile, no warnings
+
+HARNESS CHANGE (shared Arduino.h)
+  + SerialMock::peek()  (lookahead without consume, mirrors HardwareSerial;
+    first draft used a peek-gated busy loop, later replaced by the queue -
+    peek kept for API parity, harmless)
+
+SIM SUITE (_hostcheck/sim_stage5.cpp): 34 checks, fails=0, exit 0
+  1. G0.2 fwd: go ack + done line, got=194.1 (window [190,210]), pose straight
+  2. G-0.2: signed metres -> backward, got<0, pose x<0
+  3. L90 / R45: tturn carries got= (the checkpoint "result line contains the
+     achieved angle"), heading ccw+/cw- respectively
+  4. SEQUENCE "G0.2 L90 G0.3" as ONE string: done+tturn+done = 2+1+1,
+     L-shaped end pose (205,293) ~ model (200,300)
+  5. skip rule: "Xyz ,.! Q7 G0.1\n" -> only G executes, no err lines;
+     lowercase g/l accepted (case-insensitive, documented)
+  6. sign rules: L-45 turns LEFT (abs rule), R-45 mirrored (true heading -46.8;
+     got=-40.7 - the 151-vs-160 track delta, stage-4 gate territory, not stage 5)
+  7. out-of-range: G99 -> err + string continues with L90 executing;
+     L3/L2000/G0.001 -> err, no motion (log waited out fully)
+  8. busy window: L90 sent mid-drive does NOT preempt (queues); c aborts
+     mid-motion, stops (coast decay tau 0.35 s -> 1.5 s wait), FLUSHES the
+     queue (stop = stop, not pause)
+  9. diag keys alive: K gain, m mode, p state
+  10. "L90 R90" one string: 2 tturns, end heading -0.7 deg (net cancellation)
+
+REGRESSION
+  stage3 suite: fails=0      stage4 suite: fails=0   (Arduino.h change is additive)
+
+BUGS FOUND AND FIXED DURING VERIFICATION (both real, caught by the sim)
+  B1. execDriveG ranged the SIGNED value -> G-0.2 rejected. Fix: range the
+      magnitude, sign carries direction (mirrors stage-3 F/B abs handling).
+  B2. first draft was variant A (next letter fetched only after the motion):
+      the parser consumed "L90"/"G0.3" chars mid-drive and the stage-3/4
+      "new command aborts running motion" rule ate them -> sequences corrupted.
+      Fix: execution variant B (guide stage-6 table) - non-blocking parser as
+      chars arrive, complete commands wait in an 8-entry program queue,
+      dispatchStep starts the next when idle. queue full = err + honest drop.
+
+SCOPE / NOT VERIFIED HERE
+  - real-robot behaviour (dead band under load, coast run-on asymmetry):
+    first session = G0.2, L90, G-0.2 with the stage-4 pre-flight gate first
+  - track constants remain PROVISIONAL (stage-4 confirmation pending)
+  - RX buffer math for the stage-6 route string: report, not sim
+
+DESICIONS RECORDED FOR REPORT_STAGE5 (sec.2)
+  - G: signed metres (negative = backwards) per the guide's table; mm conversion
+    at the exec layer, odometry stays mm
+  - L/R: direction from the letter; negative argument = abs (one convention
+    across stages 3/4/5)
+  - ranges: G 0.005..5.000 m (stage 3 envelope), L/R 5..1440 deg (stage 4)
+  - out-of-range: one err line, no motion, rest of string continues
+  - case-insensitive letters; unknown chars skipped silently; diag keys
+    (c b e m p s t x z h K J) are reserved single chars (documented trade-off)
+  - execution variant B with QUEUE_CAP=8 (64 B RAM); c/b abort = stop + flush

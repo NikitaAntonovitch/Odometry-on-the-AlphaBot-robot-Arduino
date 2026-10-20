@@ -77,6 +77,7 @@ struct SerialMock {
   void begin(unsigned long) {}
   int  available();
   int  read();
+  int  peek();                       // stage 5: variant-A busy-window lookahead, like HardwareSerial
   float parseFloat();
   void print(const char* s)               { sim::out(s); }
   void print(const __FlashStringHelper* p){ sim::out(reinterpret_cast<const char*>(p)); }
@@ -303,6 +304,10 @@ inline int SerialMock::read() {
   if (sim::rxQueue.empty()) return -1;
   char c = sim::rxQueue.front(); sim::rxQueue.pop_front();
   return (unsigned char)c;
+}
+inline int SerialMock::peek() {              // stage 5: look, do not consume
+  if (sim::rxQueue.empty()) return -1;
+  return (unsigned char)sim::rxQueue.front();
 }
 inline float SerialMock::parseFloat() {
   // enough for a simple stage-5 sketch; the stage-1 sketch never calls it
