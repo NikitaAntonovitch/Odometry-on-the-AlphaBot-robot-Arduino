@@ -1,10 +1,17 @@
 // iss lab1 - stage 5: communication protocol over the serial interface
 // the stage 3 straight controller and the stage 4 turn controller merged into one
 // program, driven by the assignment's command string: G<metres> L<deg> R<deg> ...
-// execution variant A (guide stage 6 table): a motion runs to completion before the
+// execution variant B (guide stage 6 table): a motion runs to completion before the
 // next command letter is fetched - the rest of the string waits in the uart rx buffer
 // (64 B on the uno; route strings are ~22 chars, capacity math recorded in the report).
 // forbidden: AlphaBot.h and anything from the waveshare examples - all written from scratch
+
+/* ===== FREEZE STAMP =====
+   date: 21.10.2026 | firmware tag: stage5-v1-FROZEN
+   k = 5.108 mm/count (turn grid 1.94 deg/count)
+   b_spin = 151 mm (1440-gate confirmed) | TRACK_PIVOT = 145 mm (provisional)
+   K_SYM = 3.0 | PWM_MIN = 85 | PWM_CRUISE 130 (drive) / 110 (turn)
+   FROZEN - no further calibration. known limitations: see REPORT_STAGE5.md */
 
 /* ===== interface speeds =====
    kept in one place, a mismatch here gives the symptom "nothing works" */

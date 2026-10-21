@@ -8,6 +8,14 @@
 // longer than the 64 B rx buffer still executes whole.
 // forbidden: AlphaBot.h and anything from the waveshare examples - all written from scratch
 
+/* ===== FREEZE STAMP =====
+   date: 21.10.2026 | firmware tag: stage6-v1-FROZEN
+   k = 5.108 mm/count (turn grid 1.94 deg/count)
+   b_spin = 151 mm (1440-gate confirmed) | TRACK_PIVOT = 145 mm (provisional)
+   K_SYM = 3.0 | PWM_MIN = 85 | PWM_CRUISE 130 (drive) / 110 (turn)
+   decision gate 21.10: A->B 3 runs + turn-band check -> FREEZE / breakaway patch
+   FROZEN - no further calibration. known limitations: see REPORT_STAGE6.md */
+
 /* ===== interface speeds =====
    kept in one place, a mismatch here gives the symptom "nothing works" */
 static const unsigned long SERIAL_BAUD = 9600;   // same link as stages 2/3/4
