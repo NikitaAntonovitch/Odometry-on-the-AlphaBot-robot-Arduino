@@ -42,7 +42,7 @@ ROW_RE = re.compile(
 )
 HDR_RE = re.compile(r"^\|\s*angle\s*\|\s*dir\s*\|", re.IGNORECASE)
 SEP_RE = re.compile(r"^\|[\s:|-]+\|$")
-MODE_RE = re.compile(r"^##\s+Table\s+(\d+)\s+—\s+(SPIN|PIVOT)", re.IGNORECASE)
+MODE_RE = re.compile(r"^##\s+Table\s+(\d+)\s*[—-]\s*(SPIN|PIVOT)\b", re.IGNORECASE)
 
 
 def cell(v):
@@ -50,6 +50,7 @@ def cell(v):
     v = (v or "").strip()
     if not v or v == UNMEASURED or v.upper().startswith("ABORT"):
         return None
+    v = v.replace("\u2212", "-")   # U+2212: reports/editors write −1.50, float() only knows '-'
     try:
         return float(v)
     except ValueError:
