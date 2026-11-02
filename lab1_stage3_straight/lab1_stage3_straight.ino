@@ -46,8 +46,30 @@ static const float DEC_MM = 60.0f;        // deceleration ramp: >= stage 1 coast
                                           // slowdown to V_FLOOR removes almost all of it
 static const float STOP_TOL_MM = 10.0f;   // 2 counts - quantisation floor from stage 2 report sec.8
 static const uint16_t CTRL_MS  = 20;      // control period, 50 Hz, far above the ~11 ms/edge pulse rate
-static const uint16_t STALL_MS = 1500;    // abort when the wheels produce no counts this long: jam,
+static const uint16_t STALL_MS = 1500;    // abort when BOTH wheels produce no counts this long: jam,
                                           // dead band below the floor, or the drive is simply unpowered
+static const uint16_t WHEEL_STOP_MS = 300;  // wheel guard, detector 1 (silence): a wheel producing
+                                            // no edge this long while the partner still edges is
+                                            // stalled. sized vs the edge gap at the profile floor
+                                            // (pwm 85 ~ 197 mm/s ~ one edge / 26 ms): 300 ms =
+                                            // ~11 missed edges - a real stop, not a slow wheel
+static const uint16_t GUARD_WIN_MS   = 200; // wheel guard, detector 2 (ratio): window over which the
+                                            // two wheel displacements are compared
+static const uint8_t  GUARD_RATIO_PCT = 20; // ...one wheel moved < 20 % of the partner's path ->
+                                            // it is HELD (a hand on the wheel). catches the jerky
+                                            // hold that defeats detector 1: the held wheel keeps
+                                            // squeezing out single jerk edges which reset the
+                                            // silence timer, but the jerks cannot fake the
+                                            // displacement. margins both ways: healthy asymmetry
+                                            // is <= 7 % (stage 2), a firm hand-hold slips <= 1
+                                            // count / 200 ms -> <= 13 % even at the slow floor
+                                            // speed (pwm 85 ~ 38 cnt/s real). NOTE for a stage-4/6
+                                            // port: pivot turns have one wheel at zero -> the
+                                            // ratio detector MUST be suspended in pivot mode
+static const int32_t  GUARD_MIN_MOVE = 5;   // ...and the partner must have moved >= 5 counts
+                                            // (~25 mm, ~127 mm/s) in the window: below that the
+                                            // wheels are too slow for the ratio to mean anything
+                                            // and detector 1 covers the case (edge gap << 300 ms)
 static const float K_SYM  = 3.0f;         // symmetry gain, pwm per mm of wheel difference.
                                           // floor-tuned 14.10: L-R count spread 10/18 cnt at K0
                                           // -> 4 at K1 -> 2 at K3 (B-drives); no start wobble seen
@@ -174,6 +196,87 @@ void stopMotion() {                  // cut the drive, freeze the state, one lin
   mot = M_IDLE;
 }
 
+/* ===== wheel guard =====
+   one shared detector used by BOTH the commanded drives and the manual mode:
+   if ONE wheel stops rotating while the other still turns, brake both at once -
+   the robot must never pivot around a held wheel, and distance counting must
+   freeze with the real travel. two detectors, either one fires:
+   1. silence - no edge from one wheel for WHEEL_STOP_MS while the partner edges
+      (catches a clean stall: motor off on one side, rope on the wheel)
+   2. ratio - over a GUARD_WIN_MS window one wheel moved < GUARD_RATIO_PCT of the
+      partner's path while the partner covered >= GUARD_MIN_MOVE (catches a HAND
+      HOLD: the held wheel keeps squeezing out jerk edges that reset the silence
+      timer, but the jerks are single counts - the displacement ratio exposes them)
+   the guard brakes immediately and latches one-shot; the caller (loop) ends the
+   active mode - commanded drive or manual - so nothing restarts the wheels */
+static bool guardTrippedL = false, guardTrippedR = false;   // which wheel fired, for the line
+static int32_t  gWinL = 0, gWinR = 0;                       // counters at the last ratio window
+static uint32_t gWinMs = 0;                                 // ratio window bookkeeping
+static int32_t  gLastL = 0, gLastR = 0;                     // detector 1: counters at the last pass
+static uint32_t gMoveLms = 0, gMoveRms = 0;                 // detector 1: last edge time per wheel
+static bool guardLatched = false;                           // one-shot: fired stays fired until re-arm
+
+bool wheelGuardCheck() {             // call every loop pass; true exactly once per fault
+  uint32_t nowMs = millis();
+  int32_t cL = encCountL();
+  int32_t cR = encCountR();
+  if (benchMode || millis() - lastDriveMs >= 100) {
+    // guard watches only while the drive is COMMANDED now (a drive command refreshes
+    // lastDriveMs every control step, manual mode via loop below): a hand push on a
+    // PARKED robot must not trip it - there is no torque to fight, the coast window
+    // freeze takes care of counting. bench mode is quiet for the same reason.
+    gWinL = cL; gWinR = cR; gWinMs = nowMs;                // windows stay fresh, no stale jump
+    gLastL = cL; gLastR = cR; gMoveLms = nowMs; gMoveRms = nowMs;
+    guardLatched = false;                                  // arm state follows the drive state
+    return false;
+  }
+  if (guardLatched) return false;    // already fired, wait for wheelGuardArm() on the next motion
+  // --- detector 1: per-wheel silence ---
+  if (cL != gLastL) { gLastL = cL; gMoveLms = nowMs; }   // left wheel produced edges
+  if (cR != gLastR) { gLastR = cR; gMoveRms = nowMs; }   // right wheel produced edges
+  bool lSilent = nowMs - gMoveLms > WHEEL_STOP_MS;
+  bool rSilent = nowMs - gMoveRms > WHEEL_STOP_MS;
+  bool oneSilent = lSilent != rSilent;                   // exactly one wheel silent
+  // --- detector 2: displacement ratio over the window ---
+  if (nowMs - gWinMs >= GUARD_WIN_MS) {
+    int32_t dL = cL - gWinL;                           // signed per-wheel displacement in the window
+    int32_t dR = cR - gWinR;
+    int32_t aL = dL < 0 ? -dL : dL;                    // magnitudes: a held wheel jerking back
+    int32_t aR = dR < 0 ? -dR : dR;                    // and forth nets near zero either way
+    int32_t big = aL > aR ? aL : aR;                   // the rolling wheel, whatever the direction
+    int32_t small = aL > aR ? aR : aL;                 // the possibly-held wheel
+    if (big >= GUARD_MIN_MOVE && (int32_t)small * 100 < (int32_t)big * GUARD_RATIO_PCT) {
+      oneSilent = true;                                // treat as one-wheel-stopped
+      guardTrippedL = aL < aR;                         // name the held wheel
+      guardTrippedR = !guardTrippedL;
+    }
+    gWinL = cL; gWinR = cR; gWinMs = nowMs;
+  }
+  if (oneSilent) {
+    guardLatched = true;                               // one shot: no duplicate lines from run-on
+    if (oneSilent && !guardTrippedL && !guardTrippedR) {   // detector 1 verdict: name the silent one
+      guardTrippedL = lSilent;
+      guardTrippedR = rSilent;
+    }
+    brake();                                           // both wheels stop NOW, ~5 mm run-on
+    Serial.print(F("err: wheel stopped ("));
+    Serial.print(guardTrippedL ? F("L") : F("R"));
+    Serial.println(F(") - both stopped, distance frozen"));
+    return true;
+  }
+  return false;
+}
+
+void wheelGuardArm() {               // (re)arm from the current counters - at every motion start
+  gWinL = encCountL();
+  gWinR = encCountR();
+  gWinMs = millis();                 // ratio window restarts with the motion
+  gLastL = gWinL; gLastR = gWinR;
+  gMoveLms = millis(); gMoveRms = millis();   // silence timers restart too
+  guardTrippedL = guardTrippedR = false;
+  guardLatched = false;
+}
+
 void beginDrive(int8_t dir, float mm) {
   startL = encCountL();              // deltas measured from here, no z needed between drives
   startR = encCountR();
@@ -181,6 +284,7 @@ void beginDrive(int8_t dir, float mm) {
   tgtMM  = mm;
   lastCtrlMs = millis();             // first control step a full period after the start
   lastProgressMs = millis();         // stall watchdog armed from motion start
+  wheelGuardArm();                   // wheel guard re-armed on this motion's counters
   mot = M_RUN;
 }
 
@@ -195,6 +299,8 @@ void controlStep() {                 // runs every CTRL_MS while M_RUN, never bl
     Serial.println(F("ms (check battery/dead band), aborting"));
     return;
   }
+  // per-wheel watchdog handled by wheelGuardCheck() in loop() - it must also see
+  // manual-mode stalls, so it lives outside the controller step
   float dL = cL * K_MM;              // signed wheel distances, mm
   float dR = cR * K_MM;
   float prog = 0.5f * (dL + dR) * motDir;   // mean progress magnitude toward the target
@@ -335,6 +441,7 @@ void handleChar(char ch) {
     case '1':                                   // manual fwd: open loop at curPwm, no controller
       mot = M_IDLE;                             // a running drive aborts silently, no done line
       manualOn = true; manualDir = +1;
+      wheelGuardArm();                          // fresh guard window for this manual run
       motorL(+curPwm); motorR(+curPwm);
       Serial.print(F("manual fwd pwm="));
       Serial.println(curPwm);
@@ -342,6 +449,7 @@ void handleChar(char ch) {
     case '2':                                   // manual backward
       mot = M_IDLE;
       manualOn = true; manualDir = -1;
+      wheelGuardArm();                          // fresh guard window for this manual run
       motorL(-curPwm); motorR(-curPwm);
       Serial.print(F("manual back pwm="));
       Serial.println(curPwm);
@@ -385,6 +493,7 @@ void handleChar(char ch) {
     case 'z':
       if (mot == M_RUN) stopMotion();           // zeroing under a running controller breaks it
       zeroEncoders();
+      wheelGuardArm();                          // counters jumped -> guard windows must restart
       Serial.println(F("enc zeroed"));
       break;
     case 's':                                   // s - window speed, diagnostic
@@ -452,6 +561,17 @@ void loop() {
     handleChar((char)Serial.read());
   }
   pollPendingCmd();                  // flush a number that arrived without a terminator
+  if (manualOn) {
+    lastDriveMs = millis();          // manual drive is COMMANDED driving: keep the encoder
+  }                                 // coast window open (stage-2 pattern, curMode != 0 there)
+  // wheel guard: watches BOTH wheels on every pass, in commanded drives AND manual
+  // mode. verdict true = one wheel stopped while the other turned -> the guard has
+  // already braked; here we only end the mode so no controller restarts the wheels
+  if (wheelGuardCheck()) {
+    if (mot == M_RUN) stopMotion();          // abort the commanded drive (no done line - it never reached the target)
+    manualOn = false;                        // manual mode ends too
+    mot = M_IDLE;
+  }
   if (mot == M_RUN && millis() - lastCtrlMs >= CTRL_MS) {
     lastCtrlMs = millis();           // fixed control period, 50 Hz
     controlStep();                   // the only place that drives the motors during a motion
