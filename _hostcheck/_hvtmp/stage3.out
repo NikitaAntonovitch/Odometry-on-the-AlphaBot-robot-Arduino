@@ -1,0 +1,44 @@
+== lab1 stage3 v4: K_SYM=3 PWM_MIN=85 settled-odom patch ==
+h = menu
+[sim] == F200 basic drive ==
+[sim] PASS: F200: go line with dir=fwd
+[sim] PASS: F200: done line, odometry got=191.6 (want 200 +-10)
+[sim] PASS: F200: true pose x=195.4 within 15 mm of target
+[sim] PASS: F200: exactly go+done lines, nothing else
+[sim] PASS: F200: straight - lateral y=1.4 mm, heading=0.45 deg
+[sim] == B150 backward ==
+[sim] PASS: B150: done, got=-143.0 (want -150 +-10), pose x=-145.2
+[sim] == B-200 sign rule ==
+[sim] PASS: B-200: drives backward 200 (letter carries direction)
+[sim] == gain tuning A/B ==
+[sim] PASS: K command acknowledged
+[sim] K0: heading after F300 = 6.15 deg
+[sim] PASS: K command acknowledged
+[sim] K0.6: heading after F300 = 2.12 deg
+[sim] PASS: K command acknowledged
+[sim] K3: heading after F300 = 0.29 deg
+[sim] PASS: K0 drifts clearly more than K0.6 (controller works)
+[sim] PASS: K3 better than K0.6 (more gain, less drift)
+[sim] PASS: K3 holds the line under 2 deg over 300 mm
+[sim] == consecutive drives ==
+[sim] PASS: F120 then F80 -> ~200 mm total, no z needed
+[sim] == short drive ==
+[sim] PASS: F30 completes (profile handles sub-ramp distances)
+[sim] == telemetry ==
+[sim] PASS: telemetry on: tel lines streamed during the drive
+[sim] PASS: telemetry off: no tel lines in the log
+[sim] == range rules ==
+[sim] PASS: F99999: rejected with err line, no motion
+[sim] PASS: F0: rejected, no motion
+[sim] PASS: bare F: rejected after the quiet window
+[sim] == garbage tolerance ==
+[sim] PASS: qQ!F300w: junk ignored, F300 executed
+[sim] == manual abort ==
+[sim] PASS: abort: no done line after manual stop
+[sim] PASS: abort: robot actually stopped after run-on decay
+[sim] == stage2 regression ==
+[sim] PASS: bench: 1 hand rev left = 40 counts, right 0
+[sim] == scale error separation ==
+[sim] PASS: F500: odometry got=490.4 vs true 495.3 (controller+quantisation bound)
+
+== stage3 scenario finished, fails=0 ==

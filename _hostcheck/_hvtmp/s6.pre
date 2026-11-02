@@ -1,0 +1,739 @@
+/* ===== FREEZE STAMP =====
+   date: 21.10.2026 | firmware tag: stage6-v1-FROZEN
+   k = 5.108 mm/count (turn grid 1.94 deg/count)
+   b_spin = 151 mm (1440-gate confirmed) | TRACK_PIVOT = 145 mm (provisional)
+   K_SYM = 3.0 | PWM_MIN = 85 | PWM_CRUISE 130 (drive) / 110 (turn)
+   decision gate 21.10: A->B 3 runs + turn-band check -> FREEZE / breakaway patch
+   FROZEN - no further calibration. known limitations: see REPORT_STAGE6.md */
+/* ===== interface speeds =====
+   kept in one place, a mismatch here gives the symptom "nothing works" */
+static const unsigned long SERIAL_BAUD = 9600;   
+/* ===== pin map ===== */
+static const uint8_t PIN_ENA  = 5,  PIN_IN1 = A0, PIN_IN2 = A1;   
+static const uint8_t PIN_ENB  = 6,  PIN_IN3 = A2, PIN_IN4 = A3;   
+static const uint8_t PIN_CNTL = 2,  PIN_CNTR = 3;                 
+static const int8_t SIGN_L = -1;   
+static const int8_t SIGN_R = -1;   
+static const int PWM_MAX = 255;    
+/* ===== odometry constants (stage 2 calibration) ===== */
+static const uint8_t  SLOTS    = 20;       
+static const uint8_t  N_REV    = 2*SLOTS;
+static const float    WHEEL_D  = 65.0f;    
+static const float    K_MM     = 5.1087f;  
+static const uint16_t COAST_MS = 2000;     
+static const uint16_t DEBOUNCE_US = 800;   
+/* ===== shared motion constants ===== */
+static const float    PWM_PER_MMS = 130.0f / 302.0f;  
+static const int      PWM_MIN     = 85;    
+static const uint16_t CTRL_MS     = 20;    
+static const uint16_t STALL_MS    = 1500;  
+static const float    K_SYM       = 3.0f;  
+static const uint16_t SPD_WIN     = 500;   
+/* ===== straight-controller constants (stage 3 v4, unchanged values) ===== */
+static const int   PWM_CRUISE_DRV = 130;   
+static const float V_CRUISE_DRV   = 302.0f;
+static const float ACC_MM = 60.0f;         
+static const float DEC_MM = 60.0f;         
+static const float STOP_TOL_MM = 10.0f;    
+static const int   CORR_MAX_DRV = 30;      
+static const float TGT_MIN_MM = 5.0f;      
+static const float TGT_MAX_MM = 5000.0f;
+/* ===== turn-controller constants (stage 4 v3, unchanged values) ===== */
+/* track stays PROVISIONAL until the 1440deg x3/dir confirmation session (MEASURE_STAGE4 1a).
+   do NOT enter 144 - its scale error hides behind run-on at 45-90deg and blows up multi-rev */
+static float trackMm      = 151.0f;   
+static float trackMmPivot = 145.0f;   
+static const int   PWM_CRUISE_TRN = 110;  
+static const float V_CRUISE_TRN   = 110.0f / PWM_PER_MMS;  
+static const float ACC_DEG = 30.0f;       
+static const float DEC_DEG = 30.0f;       
+static const float STOP_TOL_DEG = 0.7f;   
+static const int   CORR_MAX_TRN = 20;     
+static const int   PULSE_PWM    = 120;    
+static const uint16_t PULSE_MS  = 150;
+static const int   KICK_PWM     = 95;     
+static const uint16_t KICK_MS   = 60;
+static const uint16_t QUIET_MS  = 100;    
+static const uint16_t COAST_TMO = 1000;   
+static const int   RETRY_MAX    = 1;      
+/* ===== protocol constants (stage 5, the new layer) =====
+   command string: G<metres> L<deg> R<deg>, separated by anything non-alphanumeric.
+   rules decided and recorded in REPORT_STAGE5 sec.2:
+   - G: SIGNED metres, negative = backwards (the guide's table). converted to mm here.
+   - L/R: direction lives in the LETTER; a negative number is taken as its absolute
+     value (same rule as stage 3 F/B and stage 4 L/R - one convention everywhere).
+   - ranges: G 0.005..5.000 m (stage 3 envelope), L/R 5..1440 deg (stage 4 envelope).
+     out of range = one err line, NO motion, the rest of the string still executes.
+   - letters are case-insensitive; any other character is skipped with no side effect.
+     diag keys (c b e m p s t x z h K J) are reserved single characters - a junk string
+     that happens to contain one gets that diagnostic action (documented trade-off).
+   - one RESULT line per command (done=... / tturn=...) + one go acknowledgement at
+     motion start - the go/done pair is the stages 3/4 format, kept for continuity. */
+static const float ANG_MIN_DEG = 5.0f;
+static const float ANG_MAX_DEG = 1440.0f;  
+/* ===== command queue (execution variant B, guide stage-6 table) =====
+   a complete parsed command waits here while a motion runs, so a sequence sent as
+   one string executes back to back WITHOUT the new-command-aborts-motion rule of
+   stages 3/4 (that rule would eat every command after the first). chosen over
+   variant A because the parser is non blocking: chars are consumed as they arrive,
+   so the rx buffer alone cannot hold the execution order. capacity: a stage-6 route
+   is ~4-8 commands; 8 x 8 B = 64 B RAM on a 2 kB part. overflow = err + drop. */
+static const uint8_t QUEUE_CAP = 8;
+struct CmdItem {                      
+  char  letter;                       
+  float value;                        
+};
+static CmdItem cmdQ[QUEUE_CAP];
+static uint8_t qHead = 0, qLen = 0;   
+bool queuePush(char letter, float value) {
+  if (qLen >= QUEUE_CAP) return false;
+  cmdQ[(qHead + qLen) % QUEUE_CAP] = { letter, value };
+  qLen++;
+  return true;
+}
+bool queuePop(char &letter, float &value) {
+  if (qLen == 0) return false;
+  letter = cmdQ[qHead].letter;
+  value  = cmdQ[qHead].value;
+  qHead = (qHead + 1) % QUEUE_CAP;
+  qLen--;
+  return true;
+}
+void queueClear() { qHead = 0; qLen = 0; }   
+uint8_t queueDepth() { return qLen; }
+void execPending(char letter, float v);      
+/* ===== encoder state (stage 2/3/4, unchanged) ===== */
+static volatile int32_t cntL = 0, cntR = 0;   
+static volatile int8_t  dirL  = +1, dirR  = +1;
+static volatile uint32_t lastDriveMs = 0;
+static volatile int32_t snapL = 0, snapR = 0;
+static bool benchMode = false;
+static volatile uint32_t lastEdgeUsL = 0, lastEdgeUsR = 0;
+void isrL() {
+  uint32_t t = micros();
+  if (t - lastEdgeUsL < DEBOUNCE_US) return;          
+  lastEdgeUsL = t;
+  if (!benchMode && millis() - lastDriveMs >= COAST_MS) return;   
+  if (dirL >= 0) cntL++; else cntL--;
+}
+void isrR() {
+  uint32_t t = micros();
+  if (t - lastEdgeUsR < DEBOUNCE_US) return;
+  lastEdgeUsR = t;
+  if (!benchMode && millis() - lastDriveMs >= COAST_MS) return;
+  if (dirR >= 0) cntR++; else cntR--;
+}
+bool encCounting() { return benchMode || (millis() - lastDriveMs) < COAST_MS; }
+int32_t atomicRead(volatile int32_t &v) {            
+  uint8_t s = SREG;
+  noInterrupts();
+  int32_t t = v;
+  SREG = s;                                          
+  return t;
+}
+int32_t encCountL() { return encCounting() ? atomicRead(cntL) : atomicRead(snapL); }
+int32_t encCountR() { return encCounting() ? atomicRead(cntR) : atomicRead(snapR); }
+void snapshotEncoders() { noInterrupts(); snapL = cntL; snapR = cntR; interrupts(); }
+void zeroEncoders() { noInterrupts(); cntL = 0; cntR = 0; snapL = 0; snapR = 0; interrupts(); }
+/* ===== motor layer (stage 3/4, SIGN handled as verified on the floor) ===== */
+void motorL(int pwm) {
+  dirL = (pwm >= 0) ? +1 : -1;      
+  pwm *= SIGN_L;
+  digitalWrite(PIN_IN1, pwm >= 0);
+  digitalWrite(PIN_IN2, pwm <  0);
+  analogWrite(PIN_ENA, min(abs(pwm), PWM_MAX));
+  if (pwm) lastDriveMs = millis();
+}
+void motorR(int pwm) {
+  dirR = (pwm >= 0) ? +1 : -1;
+  pwm *= SIGN_R;
+  digitalWrite(PIN_IN3, pwm <  0);
+  digitalWrite(PIN_IN4, pwm >= 0);
+  analogWrite(PIN_ENB, min(abs(pwm), PWM_MAX));
+  if (pwm) lastDriveMs = millis();
+}
+void coast() {
+  digitalWrite(PIN_ENA, LOW);
+  digitalWrite(PIN_ENB, LOW);
+}
+void brake() {                                      
+  digitalWrite(PIN_IN1, LOW);
+  digitalWrite(PIN_IN2, LOW);
+  digitalWrite(PIN_ENA, HIGH);
+  digitalWrite(PIN_IN3, LOW);
+  digitalWrite(PIN_IN4, LOW);
+  digitalWrite(PIN_ENB, HIGH);
+}
+float encMM(int32_t c) { return (float)c * K_MM; }
+/* ===== shared motion state =====
+   the two controllers are mutually exclusive (a motion starts only when idle), so the
+   start counters, control-period and watchdog stamps are ONE pair shared by both */
+static int32_t startL = 0, startR = 0;   
+static uint32_t lastCtrlMs = 0;          
+static uint32_t lastProgressMs = 0;      
+static float   symGain = K_SYM;          
+static float   spdLatestL = 0.0f, spdLatestR = 0.0f;   
+static bool    telOn = false;            
+static uint32_t lastTelMs = 0;
+/* ===== straight-line controller (stage 3 v4) =====
+   position-driven speed profile + stopping condition + proportional symmetry
+   controller on the wheel odometry difference (the assignment-required feedback) */
+enum MotState : uint8_t { M_IDLE, M_RUN };
+static MotState mot = M_IDLE;
+static int8_t  motDir = +1;          
+static float   tgtMM = 0.0f;         
+static float   cmdM = 0.0f;          
+void stopMotion() {                  
+  brake();
+  mot = M_IDLE;
+}
+void beginDrive(int8_t dir, float mm) {
+  startL = encCountL();              
+  startR = encCountR();
+  motDir = dir;
+  tgtMM  = mm;
+  lastCtrlMs = millis();             
+  lastProgressMs = millis();         
+  mot = M_RUN;
+}
+void controlStep() {                 
+  int32_t cL = encCountL() - startL;
+  int32_t cR = encCountR() - startR;
+  if (cL != 0 || cR != 0) lastProgressMs = millis();   
+  else if (millis() - lastProgressMs > STALL_MS) {     
+    stopMotion();
+    Serial.print(F("err: stalled - no counts in "));
+    Serial.print(STALL_MS);
+    Serial.println(F("ms (check battery/dead band), aborting"));
+    return;
+  }
+  float dL = cL * K_MM;              
+  float dR = cR * K_MM;
+  float prog = 0.5f * (dL + dR) * motDir;   
+  float rem  = tgtMM - prog;
+  if (rem <= STOP_TOL_MM) {          
+    stopMotion();
+    float got = prog * motDir;       
+    Serial.print(F("done cmd=G"));   
+    Serial.print(cmdM, 3);
+    Serial.print(F("m got="));       
+    Serial.print(got, 1);
+    Serial.print(F("mm err="));
+    Serial.print(got - cmdM * 1000.0f, 1);
+    Serial.print(F("mm L="));
+    Serial.print((long)cL);
+    Serial.print(F("cnt R="));
+    Serial.print((long)cR);
+    Serial.println(F("cnt"));
+    return;
+  }
+  float v = V_CRUISE_DRV;
+  float uAcc = prog / ACC_MM;        
+  float uDec = rem  / DEC_MM;        
+  float u = min(uAcc, uDec);         
+  if (u < 1.0f) v = PWM_MIN / PWM_PER_MMS + (V_CRUISE_DRV - PWM_MIN / PWM_PER_MMS) * u;
+  int pwm = (int)(v * PWM_PER_MMS + 0.5f);
+  if (pwm < PWM_MIN) pwm = PWM_MIN;
+  if (pwm > PWM_CRUISE_DRV) pwm = PWM_CRUISE_DRV;
+  float err = (dL - dR) * motDir;
+  int corr = (int)(symGain * err + (err >= 0 ? 0.5f : -0.5f));   
+  if (corr >  CORR_MAX_DRV) corr =  CORR_MAX_DRV;
+  if (corr < -CORR_MAX_DRV) corr = -CORR_MAX_DRV;
+  int pwmL = pwm - corr;             
+  int pwmR = pwm + corr;             
+  if (pwmL < PWM_MIN) pwmL = PWM_MIN;   
+  if (pwmR < PWM_MIN) pwmR = PWM_MIN;
+  motorL(motDir * pwmL);
+  motorR(motDir * pwmR);
+  if (telOn && millis() - lastTelMs >= 100) {   
+    lastTelMs = millis();
+    Serial.print(F("tel prog="));
+    Serial.print(prog, 1);
+    Serial.print(F(" rem="));
+    Serial.print(rem, 1);
+    Serial.print(F(" err="));
+    Serial.print(err, 1);
+    Serial.print(F(" pwmL="));
+    Serial.print(pwmL);
+    Serial.print(F(" pwmR="));
+    Serial.println(pwmR);
+  }
+}
+/* ===== turn controller (stage 4 v3, full stop-quality machine) =====
+   kinematics: spin s_w = b*theta/2 per wheel, pivot s_m = b*theta on the moving wheel.
+   sign convention (recorded, reused by the protocol): POSITIVE = ccw from above = LEFT */
+enum TurnState : uint8_t { T_IDLE, T_RUN, T_PULSE, T_COAST, T_KICK };
+enum TurnMode  : uint8_t { M_SPIN, M_PIVOT_L, M_PIVOT_R };
+static TurnState trn = T_IDLE;
+static uint32_t  phaseStartMs = 0;    
+static uint32_t  coastLastMs = 0;     
+static int32_t   coastSnapL = 0, coastSnapR = 0;
+static int32_t   coastL = 0, coastR = 0;           
+static int8_t    retriesLeft = RETRY_MAX;
+static bool      corrected = false;   
+static TurnMode  tmode = M_SPIN;
+static int8_t    tsign = +1;          
+static float     tgtDeg = 0.0f;
+static float     lastAchievedDeg = 0.0f;           
+static float getTrack(bool pivot) {    
+  return pivot ? trackMmPivot : trackMm;
+}
+static float wheelTargetMM() {                       
+  float rad = tgtDeg * 3.14159265f / 180.0f;
+  if (tmode == M_SPIN)  return getTrack(false) * rad / 2.0f;
+  return getTrack(true) * rad;                       
+}
+static float progressDeg() {                         
+  int32_t cL = encCountL() - startL + coastL;        
+  int32_t cR = encCountR() - startR + coastR;
+  float sL = cL * K_MM;
+  float sR = cR * K_MM;
+  if (tmode == M_SPIN)  return (sR - sL) / getTrack(false) * 180.0f / 3.14159265f;
+  if (tmode == M_PIVOT_L) return ( sR / getTrack(true)) * 180.0f / 3.14159265f;
+  return                        (-sL / getTrack(true)) * 180.0f / 3.14159265f;
+}
+float turnAchievedDeg() { return trn == T_RUN ? progressDeg() : lastAchievedDeg; }
+void stallAbort() {                                  
+  lastAchievedDeg = progressDeg();
+  brake();
+  trn = T_IDLE;
+  Serial.println(F("err: stalled - no counts in 1500ms, aborting turn"));
+}
+void driveTurn(int pwm) {              
+  if (pwm < 0) pwm = -pwm;             
+  if (tmode == M_SPIN) {
+    int mag = pwm;
+    if (mag > PWM_CRUISE_TRN) mag = PWM_CRUISE_TRN;
+    if (tsign > 0) { motorL(-mag); motorR(+mag); }   
+    else           { motorL(+mag); motorR(-mag); }
+  } else if (tmode == M_PIVOT_L) {
+    motorL(0);
+    motorR(tsign > 0 ? +pwm : -pwm);
+  } else {
+    motorR(0);
+    motorL(tsign > 0 ? -pwm : +pwm);
+  }
+}
+void driveReverse(int pwm) {           
+  if (pwm < 0) pwm = -pwm;
+  if (tmode == M_SPIN) {
+    if (tsign > 0) { motorL(+pwm); motorR(-pwm); }
+    else           { motorL(-pwm); motorR(+pwm); }
+  } else if (tmode == M_PIVOT_L) {
+    motorL(0);
+    motorR(tsign > 0 ? -pwm : +pwm);
+  } else {
+    motorR(0);
+    motorL(tsign > 0 ? +pwm : -pwm);
+  }
+}
+void startCoastPoll() {                
+  brake();
+  coastSnapL = encCountL();
+  coastSnapR = encCountR();
+  coastLastMs = millis();
+  phaseStartMs = millis();
+  trn = T_COAST;
+}
+void turnStart(float deg, uint8_t mode, int8_t sign) {
+  startL = encCountL();
+  startR = encCountR();
+  tmode = (TurnMode)mode;
+  tsign = sign;
+  tgtDeg = deg;
+  coastL = 0; coastR = 0;                            
+  retriesLeft = RETRY_MAX;
+  corrected = false;
+  lastCtrlMs = millis();                             
+  lastProgressMs = millis();
+  phaseStartMs = millis();
+  trn = T_PULSE;                                     
+  driveTurn(PULSE_PWM);
+}
+void reportTurn(int32_t cL, int32_t cR) {            
+  Serial.print(F("tturn cmd="));
+  Serial.print(tsign > 0 ? F("L") : F("R"));
+  Serial.print(tgtDeg, 1);
+  Serial.print(F(" got="));
+  Serial.print(lastAchievedDeg, 1);                  
+  Serial.print(F("deg L="));
+  Serial.print((long)cL);
+  Serial.print(F("cnt R="));
+  Serial.print((long)cR);
+  Serial.print(F("cnt"));
+  if (coastL != 0 || coastR != 0) {
+    Serial.print(F(" coast="));
+    Serial.print((long)(labs(coastL) > labs(coastR) ? coastL : coastR));
+    Serial.println(F("cnt"));
+  } else {
+    Serial.println();
+  }
+}
+void stopTurn() {                                    
+  brake();                                           
+  coastSnapL = encCountL();
+  coastSnapR = encCountR();
+  coastLastMs = millis();
+  phaseStartMs = millis();
+  trn = T_KICK;
+  driveReverse(KICK_PWM);
+}
+void settlePhase() {                                 
+  int32_t nowL = encCountL(), nowR = encCountR();    
+  if (nowL != coastSnapL || nowR != coastSnapR) {
+    coastL += nowL - coastSnapL;
+    coastR += nowR - coastSnapR;
+    coastSnapL = nowL; coastSnapR = nowR;
+    coastLastMs = millis();
+    return;
+  }
+  if (millis() - coastLastMs < QUIET_MS && millis() - phaseStartMs < COAST_TMO) return;
+  float prog = progressDeg() * tsign;
+  float over = prog - tgtDeg;                        
+  float oneCntDeg = (tmode == M_SPIN ? 2.0f : 1.0f) * K_MM / getTrack(tmode != M_SPIN) * 180.0f / 3.14159265f;
+  if (!corrected && over >= oneCntDeg * 0.5f) {      
+    corrected = true;
+    coastSnapL = encCountL();
+    coastSnapR = encCountR();
+    coastLastMs = millis();
+    phaseStartMs = millis();
+    trn = T_KICK;
+    driveReverse(KICK_PWM);
+    return;
+  }
+  trn = T_IDLE;
+  lastAchievedDeg = progressDeg();                   
+  reportTurn(encCountL() - startL + coastL, encCountR() - startR + coastR);
+}
+void turnStep() {                                    
+  if (trn == T_PULSE) {
+    if (encCountL() != startL || encCountR() != startR) {   
+      lastCtrlMs = millis();
+      lastProgressMs = millis();
+      trn = T_RUN;
+    } else if (millis() - phaseStartMs >= PULSE_MS) {
+      lastCtrlMs = millis();
+      lastProgressMs = millis();
+      trn = T_RUN;
+    } else if (millis() - phaseStartMs > STALL_MS) {
+      if (retriesLeft > 0) {
+        retriesLeft--;
+        phaseStartMs = millis();
+        driveTurn(PULSE_PWM);
+      } else {
+        stallAbort();
+      }
+    }
+    return;
+  }
+  if (trn == T_COAST) { settlePhase(); return; }
+  if (trn == T_KICK) {
+    if (millis() - phaseStartMs >= KICK_MS) {
+      brake();                                       
+      coastL += encCountL() - coastSnapL;            
+      coastR += encCountR() - coastSnapR;
+      coastSnapL = encCountL();
+      coastSnapR = encCountR();
+      coastLastMs = millis();
+      phaseStartMs = millis();
+      trn = T_COAST;
+    }
+    return;
+  }
+  if (trn != T_RUN) return;
+  int32_t cL = encCountL() - startL + coastL;
+  int32_t cR = encCountR() - startR + coastR;
+  if (cL != 0 || cR != 0) lastProgressMs = millis();
+  else if (millis() - lastProgressMs > STALL_MS) {
+    if (retriesLeft > 0) {
+      retriesLeft--;
+      phaseStartMs = millis();
+      trn = T_PULSE;
+      driveTurn(PULSE_PWM);
+      return;
+    }
+    stallAbort();
+    return;
+  }
+  float prog = progressDeg() * tsign;
+  float rem  = tgtDeg - prog;
+  float vDeg = V_CRUISE_TRN / getTrack(tmode != M_SPIN) * 180.0f / 3.14159265f;
+  float uAcc = prog / ACC_DEG;
+  float uDec = rem  / DEC_DEG;
+  float u = min(uAcc, uDec);
+  if (u < 1.0f) {
+    float vFloor = PWM_MIN / PWM_PER_MMS / getTrack(tmode != M_SPIN) * 180.0f / 3.14159265f;
+    vDeg = vFloor + (vDeg - vFloor) * u;
+  }
+  if (rem <= STOP_TOL_DEG) {                         
+    stopTurn();                                      
+    return;                                          
+  }
+  float vMMs = vDeg / 180.0f * 3.14159265f * getTrack(tmode != M_SPIN);
+  int pwm = (int)(vMMs * PWM_PER_MMS + 0.5f);
+  if (pwm < PWM_MIN)  pwm = PWM_MIN;
+  if (pwm > PWM_CRUISE_TRN) pwm = PWM_CRUISE_TRN;
+  if (tmode == M_SPIN) {
+    float err = (fabsf((float)cL) - fabsf((float)cR)) * K_MM;   
+    int corr = (int)(symGain * err + (err >= 0 ? 0.5f : -0.5f));
+    if (corr >  CORR_MAX_TRN) corr =  CORR_MAX_TRN;
+    if (corr < -CORR_MAX_TRN) corr = -CORR_MAX_TRN;
+    int magL = pwm - corr;
+    int magR = pwm + corr;
+    if (magL < PWM_MIN) magL = PWM_MIN;              
+    if (magR < PWM_MIN) magR = PWM_MIN;
+    if (tsign > 0) { motorL(-magL); motorR(+magR); }
+    else           { motorL(+magL); motorR(-magR); }
+  } else if (tmode == M_PIVOT_L) {
+    motorL(0);                                       
+    motorR(tsign > 0 ? +pwm : -pwm);                 
+  } else {
+    motorR(0);
+    motorL(tsign > 0 ? -pwm : +pwm);
+  }
+  if (telOn && millis() - lastTelMs >= 100) {
+    lastTelMs = millis();
+    Serial.print(F("tel prog="));
+    Serial.print(prog, 1);
+    Serial.print(F(" rem="));
+    Serial.print(rem, 1);
+    Serial.print(F("deg pwm="));
+    Serial.println(pwm);
+  }
+}
+/* ===== command execution (protocol layer) ===== */
+void execDriveG(float m) {             
+  float mag = m < 0 ? -m : m;          
+  float mm = mag * 1000.0f;            
+  if (mm < TGT_MIN_MM || mm > TGT_MAX_MM) {
+    Serial.println(F("err: G out of range (0.005..5.000 m)"));
+    return;
+  }
+  cmdM = m;                            
+  beginDrive(m >= 0 ? +1 : -1, mm);    
+  Serial.print(F("go cmd=G"));
+  Serial.print(m, 3);
+  Serial.print(F("m dir="));
+  Serial.println(m >= 0 ? F("fwd") : F("back"));
+}
+void execTurn(char letter, float arg) {
+  float deg = arg < 0 ? -arg : arg;    
+  if (deg < ANG_MIN_DEG || deg > ANG_MAX_DEG) {
+    Serial.println(F("err: angle out of range (5..1440 deg)"));
+    return;
+  }
+  turnStart(deg, tmode, letter == 'L' ? +1 : -1);    
+  Serial.print(F("go cmd="));
+  Serial.print(letter);
+  Serial.print(deg, 1);
+  Serial.print(F("deg mode="));
+  Serial.println(tmode == M_SPIN ? F("spin") : (tmode == M_PIVOT_L ? F("pivotL") : F("pivotR")));
+}
+/* ===== protocol parser =====
+   same char state machine as stages 3/4: non blocking, no parseFloat timeout, one
+   decimal point, sign anywhere before the digits, flush on terminator or 50 ms quiet */
+static char   cmdLetter = 0;         
+static bool   numNeg = false;
+static long   numAcc = 0;
+static long   numFrac = 0;
+static int    numFracN = -1;          
+static bool   numSeen = false;
+static uint32_t lastCharMs = 0;
+void flushPendingCmd() {
+  if (!cmdLetter) return;
+  char letter = cmdLetter;
+  float v = (float)numAcc;
+  if (numFracN > 0) {
+    float div = 1.0f;
+    for (int i = 0; i < numFracN; i++) div *= 10.0f;
+    v += (float)numFrac / div;
+  }
+  if (numNeg) v = -v;
+  cmdLetter = 0; numAcc = 0; numFrac = 0; numFracN = -1; numSeen = false; numNeg = false;
+  if (letter == 'K') {                               
+    if (v < 0) v = 0;
+    symGain = v;
+    Serial.print(F("gain="));
+    Serial.println(symGain, 2);
+    return;                                          
+  }
+  if (letter == 'J') {                               
+    if (v < 50) v = 50;
+    if (tmode == M_SPIN) {
+      trackMm = v;
+      Serial.print(F("track spin="));
+    } else {
+      trackMmPivot = v;
+      Serial.print(F("track pivot="));
+    }
+    Serial.println(v, 1);
+    return;
+  }
+  bool busy = (mot == M_RUN) || (trn != T_IDLE);
+  if (busy) {
+    if (queuePush(letter, v)) return;                
+    Serial.println(F("err: queue full, command dropped"));   
+    return;
+  }
+  execPending(letter, v);                            
+}
+void execPending(char letter, float v) {             
+  if (letter == 'G') { execDriveG(v); return; }      
+  execTurn(letter, v);                               
+}
+void dispatchStep() {                                
+  if (mot == M_RUN || trn != T_IDLE) return;         
+  char letter; float v;
+  if (queuePop(letter, v)) execPending(letter, v);   
+}                                                    
+void handleChar(char ch) {
+  if (cmdLetter) {                                   
+    if (ch >= '0' && ch <= '9') {
+      if (numFracN >= 0) { numFrac = numFrac * 10 + (ch - '0'); numFracN++; }
+      else numAcc = numAcc * 10 + (ch - '0');
+      numSeen = true; lastCharMs = millis(); return;
+    }
+    if (ch == '.') { if (numFracN < 0) numFracN = 0; return; }
+    if (ch == '-') { numNeg = !numNeg; return; }
+    if (ch == '+' || ch == ' ') return;              
+    flushPendingCmd();                               
+    if (ch == '\r' || ch == '\n') return;
+  }
+  lastCharMs = millis();
+  switch (ch) {                                      
+    case 'G': case 'g':                              
+    case 'L': case 'l':
+    case 'R': case 'r':                              
+    case 'K':                                        
+    case 'J':
+      cmdLetter = (ch >= 'a' && ch <= 'z') ? (char)(ch - 'a' + 'A') : ch;
+      numAcc = 0; numFrac = 0; numFracN = -1; numSeen = false; numNeg = false;
+      break;
+    case 'm':                                        
+      tmode = (tmode == M_SPIN) ? M_PIVOT_L : (tmode == M_PIVOT_L ? M_PIVOT_R : M_SPIN);
+      Serial.print(F("turn mode="));
+      Serial.println(tmode == M_SPIN ? F("spin") : (tmode == M_PIVOT_L ? F("pivotL (about left wheel)") : F("pivotR (about right wheel)")));
+      break;
+    case 'c':                                        
+      if (mot == M_RUN) stopMotion();                
+      if (trn == T_RUN) stopTurn();                  
+      queueClear();                                  
+      coast();                                       
+      Serial.println(F("mode=stop pwm=n/a (coast)")); 
+      break;
+    case 'b':
+      if (mot == M_RUN) stopMotion();
+      if (trn == T_RUN) stopTurn();
+      queueClear();
+      brake();
+      Serial.println(F("mode=stop pwm=n/a (brake)"));
+      break;
+    case 't':
+      telOn = !telOn;
+      Serial.print(F("tel="));
+      Serial.println(telOn ? F("on") : F("off"));
+      break;
+    case 'e': {
+      int32_t cl = encCountL(), cr = encCountR();
+      Serial.print(F("enc L="));
+      Serial.print((long)cl);
+      Serial.print(F("cnt "));
+      Serial.print(encMM(cl), 1);
+      Serial.print(F("mm | R="));
+      Serial.print((long)cr);
+      Serial.print(F("cnt "));
+      Serial.print(encMM(cr), 1);
+      Serial.print(F("mm "));
+      Serial.println((mot == M_RUN || trn == T_RUN) ? F("running") : (encCounting() ? F("counting") : F("frozen")));
+      break;
+    }
+    case 'z':
+      if (mot == M_RUN) stopMotion();                
+      if (trn == T_RUN) stopTurn();                  
+      zeroEncoders();
+      Serial.println(F("enc zeroed"));
+      break;
+    case 's':
+      Serial.print(F("spd L="));
+      Serial.print(spdLatestL, 1);
+      Serial.print(F("mm/s R="));
+      Serial.print(spdLatestR, 1);
+      Serial.println(F("mm/s"));
+      break;
+    case 'p':
+      Serial.print(F("mode="));
+      if (mot == M_RUN) {
+        Serial.print(F("drive "));
+        Serial.print(motDir > 0 ? F("fwd ") : F("back "));
+        Serial.println(tgtMM, 1);
+      } else if (trn == T_RUN) {
+        Serial.print(F("turn "));
+        Serial.print(tsign > 0 ? F("L") : F("R"));
+        Serial.print(tmode == M_SPIN ? F(" spin ") : F(" pivot "));
+        Serial.println(tgtDeg, 1);
+      } else {
+        Serial.println(F("idle"));
+      }
+      break;
+    case 'x':
+      benchMode = !benchMode;
+      Serial.print(F("bench="));
+      Serial.println(benchMode ? F("on (raw edges, no freeze)") : F("off (coast window gating)"));
+      break;
+    case 'h': case '?':
+      Serial.println(F("== stage6 A-B drive: G<metres> L<deg> R<deg>, e.g. G0.8 L90 G1.2 =="));
+      Serial.println(F("G signed metres (negative=back), L/R direction from letter (negative=abs)"));
+      Serial.println(F("m turn mode  K<gain> symmetry  J<track mm>  e enc  z zero  s speed"));
+      Serial.println(F("p state  t telemetry  x bench  c coast-stop  b brake  h menu"));
+      break;
+    default:
+      break;                                         
+  }
+}
+void pollPendingCmd() {              
+  if (cmdLetter && numSeen && millis() - lastCharMs > 50) flushPendingCmd();
+  if (cmdLetter && !numSeen && millis() - lastCharMs > 300) {  
+    cmdLetter = 0;
+    Serial.println(F("err: command without a number"));
+  }
+}
+void setup() {
+  pinMode(PIN_ENA, OUTPUT);
+  pinMode(PIN_IN1, OUTPUT);
+  pinMode(PIN_IN2, OUTPUT);
+  pinMode(PIN_ENB, OUTPUT);
+  pinMode(PIN_IN3, OUTPUT);
+  pinMode(PIN_IN4, OUTPUT);
+  pinMode(PIN_CNTL, INPUT_PULLUP);   
+  pinMode(PIN_CNTR, INPUT_PULLUP);
+  coast();
+  Serial.begin(SERIAL_BAUD);
+  Serial.println(F("stage6 v1: A-B autonomous | G/L/R protocol | k=5.109 spin=151 pivot=145 [prov]"));
+  attachInterrupt(digitalPinToInterrupt(PIN_CNTL), isrL, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(PIN_CNTR), isrR, CHANGE);
+  Serial.println(F("h = menu"));
+}
+void loop() {
+  while (Serial.available() > 0) handleChar((char)Serial.read());
+  pollPendingCmd();
+  dispatchStep();                    
+  if ((mot == M_RUN || trn != T_IDLE) && millis() - lastCtrlMs >= CTRL_MS) {
+    lastCtrlMs = millis();           
+    if (mot == M_RUN) controlStep();
+    else turnStep();
+  }
+  static uint32_t winStart = 0;
+  uint32_t t = millis();
+  if (t - winStart >= SPD_WIN) {
+    static int32_t prevL = 0, prevR = 0;
+    int32_t cl = encCountL(), cr = encCountR();
+    spdLatestL = (cl - prevL) * K_MM * 1000.0f / (t - winStart);
+    spdLatestR = (cr - prevR) * K_MM * 1000.0f / (t - winStart);
+    prevL = cl; prevR = cr;
+    winStart = t;
+  }
+  static bool wasCounting = true;
+  bool nowCounting = encCounting();
+  if (wasCounting && !nowCounting) snapshotEncoders();
+  wasCounting = nowCounting;
+}

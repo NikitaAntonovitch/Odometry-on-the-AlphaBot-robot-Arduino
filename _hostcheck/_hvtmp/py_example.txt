@@ -1,0 +1,23 @@
+[EXAMPLE NUMBERS - replace with the three real runs]
+==============================================================
+stage 6 phase-3 processing: A-B route
+runs (x,y) mm from B-cross: [(12.0, -8.0), (9.0, -4.0), (15.0, -11.0)]
+--------------------------------------------------------------
+along-route mean shift  mx =   +12.0 mm   sigma_x =   3.0 mm
+lateral   mean shift  my =    -7.7 mm   sigma_y =   3.5 mm
+distance-from-B per run  : 14, 10, 19
+mean |deviation|         =   14.3 mm
+spread sigma(|dev|)      =    4.4 mm   (n=3, n-1)
+--------------------------------------------------------------
+error separation (guide table):
+  along-route: mean +12.0 vs sigma 3.0 -> SYSTEMATIC  -> fix: k (mmPerCount) re-check
+  lateral:     mean -7.7 vs sigma 3.5 -> SYSTEMATIC  -> fix: wheel track re-check
+  random (spread) is resolution+slip: tuning will not help - document
+--------------------------------------------------------------
+odometry route 2130 mm vs tape 2115 mm -> diff +15.0 mm (+0.71 %)  = CALIBRATION error, not controller error
+--------------------------------------------------------------
+paste-ready conclusions block:
+  route: A-B route
+  end-point deviation from B: mean 14 mm, spread 4 mm (3 runs)
+  systematic: along +12 mm, lateral -8 mm; random: sigma 4 mm
+  odometry-vs-tape scale: +15 mm on 2115 mm (+0.71 %) - calibration, not control

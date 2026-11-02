@@ -68,7 +68,11 @@ inline void analogWrite(uint8_t p, int v) {
   if (p < 32) sim::pinDigSet(p, v > 0 ? HIGH : LOW);
 }
 inline unsigned long millis() { return sim::now(); }
-inline unsigned long micros() { return sim::now() * 1000UL; }
+// sub-tick micro clock used only by the slip-scenario edge spacing (see emitEdges):
+// inline edges inside one stepPhysics tick otherwise share identical micros(), which
+// the sketch's ISR debounce would collapse. millis() timing is untouched.
+inline uint32_t simMicrosBump = 0;
+inline unsigned long micros() { return sim::now() * 1000UL + simMicrosBump; }
 inline void delay(unsigned long ms) { sim::setTime(sim::now() + ms); sim::stepPhysics(ms); }
 inline void attachInterrupt(uint8_t intNum, isr_t fn, int mode) { sim::attachIsr(intNum, fn, mode); }
 inline void detachInterrupt(uint8_t) {}
@@ -109,7 +113,19 @@ static const double TRACK_MM      = 160.0;  // wheel track, nominal (stage 4 cal
 static const int    SLOTS         = 20;     // encoder disc slots, nominal - count on the real disc!
 static const int    EDGES         = 2;      // react to both edges -> N_rev = 2*S
 inline int    DEADBAND_PWM  = 75;     // floor-measured under-load dead band (14.10: wheels first rolled at 75)
-static const double MAX_MM_S      = 300.0;  // wheel speed at pwm=255
+inline int    DEADBAND_L = -1;        // per-wheel dead-band override for fault-injection tests,
+inline int    DEADBAND_R = -1;        // -1 = use DEADBAND_PWM (one-wheel-stall watchdog scenario)
+inline double SLIP_L = 0.0, SLIP_R = 0.0;  // stage-7 fault hook: fraction of the wheel spin that
+                                           // does NOT couple to the ground (slip 1 = disc spins
+                                           // free: real ticks, frozen ground motion)
+inline double SLIP_FREE_GAIN = 5.0;        // slip also UNLOADS the motor: free spin ~292-312 cnt/s
+                                           // vs ~59 loaded at pwm 130 (stage-1 bench, data.txt) ->
+                                           // encoder rate scales by 1 + slip*(GAIN-1)
+inline double MAX_MM_S = 300.0;   // wheel speed at pwm=255. FROZEN default (nominal 300);
+                                  // the stage-7 fault suite sets 592.0 (floor-calibrated:
+                                  // pwm 130 -> 302 mm/s under load per the stage-2/3 map the
+                                  // sketch's PWM_PER_MMS is built on). runtime knob so the
+                                  // frozen suites keep their calibration bit-identical
 static const double ASYM_R        = 1.06;   // right wheel 6% faster at the same pwm (stage 1 measurement)
 static const double NOISE_FRAC    = 0.03;   // speed noise fraction, deterministic pattern
 static const double RUNON_COAST_S = 0.35;   // run-on time constant when coasting
@@ -179,6 +195,11 @@ inline void emitEdges(Wheel& w, double dx, isr_t isr, int mode) {
     else break;
     w.phase -= dir;
     w.ticks += dir;
+    // honest edge spacing ONLY in fault scenarios (slip -> disc free-spins several edges
+    // per physics tick): without it the sketch's 800 us ISR debounce eats every second
+    // back-to-back edge (real edges are ~3.4 ms apart at free spin). gated so normal-
+    // speed counting stays BIT-IDENTICAL to the frozen suites' calibration.
+    if (SLIP_L > 0.0 || SLIP_R > 0.0) simMicrosBump += 850;
     bool was = w.level;                    // every edge toggles the square wave, both directions
     w.level = !w.level;
     bool rising = !was, falling = was;     // transition type seen by the interrupt
@@ -195,7 +216,6 @@ inline void handTurn(double revL, double revR) {
   double dL = revL * 3.14159265358979 * WHEEL_D_MM, dR = revR * 3.14159265358979 * WHEEL_D_MM;
   long counts = (long)std::lround(std::max(std::abs(dL), std::abs(dR)) / k);  // round, not floor
   double step = k;                                                      // one count per step
-  double remL = dL, remR = dR;                // remaining travel per wheel
   long doneL = 0, doneR = 0;
   for (long i = 0; i < counts; i++) {
     double sL = (doneL < std::labs((long)std::lround(dL / k))) ? (dL > 0 ? step : -step) : 0.0;
@@ -231,8 +251,11 @@ inline void stepWheel(Wheel& w, int enDig, int enPwm, int fwdIn, int revIn, doub
   if (fwdIn != revIn) dir = fwdIn ? +1 : -1;   // one input high, one low = drive
   int duty = (enDig == HIGH) ? enPwm : 0;      // en low = coast, motor open
   duty = min(duty, 255);
+  int db = (&w == &wl) ? (DEADBAND_L < 0 ? DEADBAND_PWM : DEADBAND_L)   // per-wheel override,
+                       : (DEADBAND_R < 0 ? DEADBAND_PWM : DEADBAND_R);  // fault-injection hook
+  double slip = (&w == &wl) ? SLIP_L : SLIP_R; // stage-7 hook: 0 = normal traction
   double target = 0.0;
-  if (dir != 0 && duty > DEADBAND_PWM) {
+  if (dir != 0 && duty > db) {
     target = dir * (duty / 255.0) * MAX_MM_S * asym * (1.0 + noise);
   }
   // first order approach to target speed; time constant depends on stop mode
@@ -240,10 +263,11 @@ inline void stepWheel(Wheel& w, int enDig, int enPwm, int fwdIn, int revIn, doub
   if (dir == 0 || duty == 0) tau = braking ? RUNON_BRAKE_S : RUNON_COAST_S;
   w.v_mm_s += (target - w.v_mm_s) * (dt / tau);
   if (tau <= dt) w.v_mm_s = target;
-  double dx = w.v_mm_s * dt;
-  w.x_mm += dx;
-
-  emitEdges(w, dx, (&w == &wl) ? isr0 : isr1, (&w == &wl) ? isr0Mode : isr1Mode);
+  double dxGround = w.v_mm_s * dt * (1.0 - slip);   // what the GROUND sees (pose + stall)
+  double dxWheel  = w.v_mm_s * dt * (1.0 + slip * (SLIP_FREE_GAIN - 1.0));  // what the DISC sees:
+                                           // a slipping wheel is unloaded and free-spins faster
+  w.x_mm += dxGround;
+  emitEdges(w, dxWheel, (&w == &wl) ? isr0 : isr1, (&w == &wl) ? isr0Mode : isr1Mode);
 }
 
 inline bool channelBraking() {
@@ -259,6 +283,7 @@ inline bool SIGN_FLIP = true;   // real-robot wiring: bridge "forward" rolls the
 inline void stepPhysics(unsigned long dtMs) {
   double dt = dtMs / 1000.0;
   if (dt <= 0) return;
+  simMicrosBump = 0;                       // fresh tick, fresh micro clock
   lastNoise = 0.5 * lastNoise + 0.5 * sin(simMs * 0.013);   // deterministic low-freq noise
   bool braking = channelBraking();
   int d14 = pinDig[14], d15 = pinDig[15], d16 = pinDig[16], d17 = pinDig[17];
@@ -268,8 +293,8 @@ inline void stepPhysics(unsigned long dtMs) {
   stepWheel(wl, pinDig[5],  pinPwmV[5], d14, d15, dt, 1.0,    braking, NOISE_FRAC * lastNoise);
   stepWheel(wr, pinDig[6],  pinPwmV[6], d17, d16, dt, ASYM_R, braking, NOISE_FRAC * lastNoise);
 
-  // chassis pose from per-wheel motion (differential drive)
-  double dsL = wl.v_mm_s * dt, dsR = wr.v_mm_s * dt;
+  // chassis pose from per-wheel motion (differential drive, ground truth)
+  double dsL = wl.v_mm_s * dt * (1.0 - SLIP_L), dsR = wr.v_mm_s * dt * (1.0 - SLIP_R);
   double ds  = 0.5 * (dsL + dsR);
   double dth = (dsR - dsL) / TRACK_MM;
   poseX += ds * cos(heading + dth * 0.5);

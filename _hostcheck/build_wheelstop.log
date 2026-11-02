@@ -1,0 +1,3 @@
+_hostcheck/sim_wheelstop.cpp:5:1: warning: multi-line comment [-Wcomment]
+    5 | // build: PATH="/c/msys64/ucrt64/bin:$PATH" g++ -std=c++17 -I_hostcheck -include _hostcheck/Arduino.h \
+      | ^

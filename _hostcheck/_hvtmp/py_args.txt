@@ -1,0 +1,22 @@
+==============================================================
+stage 6 phase-3 processing: TEST
+runs (x,y) mm from B-cross: [(10.0, 0.0), (10.0, 0.0), (10.0, 0.0)]
+--------------------------------------------------------------
+along-route mean shift  mx =   +10.0 mm   sigma_x =   0.0 mm
+lateral   mean shift  my =    +0.0 mm   sigma_y =   0.0 mm
+distance-from-B per run  : 10, 10, 10
+mean |deviation|         =   10.0 mm
+spread sigma(|dev|)      =    0.0 mm   (n=3, n-1)
+--------------------------------------------------------------
+error separation (guide table):
+  along-route: mean +10.0 vs sigma 0.0 -> SYSTEMATIC  -> fix: k (mmPerCount) re-check
+  lateral:     mean +0.0 vs sigma 0.0 -> balanced/random-dominated
+  random (spread) is resolution+slip: tuning will not help - document
+--------------------------------------------------------------
+odometry route 2000 mm vs tape 2000 mm -> diff +0.0 mm (+0.00 %)  = CALIBRATION error, not controller error
+--------------------------------------------------------------
+paste-ready conclusions block:
+  route: TEST
+  end-point deviation from B: mean 10 mm, spread 0 mm (3 runs)
+  systematic: along +10 mm, lateral +0 mm; random: sigma 0 mm
+  odometry-vs-tape scale: +0 mm on 2000 mm (+0.00 %) - calibration, not control

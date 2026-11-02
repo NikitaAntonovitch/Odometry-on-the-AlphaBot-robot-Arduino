@@ -1,0 +1,9 @@
+lab1_stage6_autonomous/lab1_stage6_autonomous.ino:320:14: warning: 'float wheelTargetMM()' defined but not used [-Wunused-function]
+  320 | static float wheelTargetMM() {                       // commanded per-wheel distance magnitude
+      |              ^~~~~~~~~~~~~
+_hostcheck/sim_stage4.cpp:2:1: warning: multi-line comment [-Wcomment]
+    2 | // build: PATH="/c/msys64/ucrt64/bin:$PATH" g++ -std=c++17 -I_hostcheck -include _hostcheck/Arduino.h \
+      | ^
+_hostcheck/sim_stage4.cpp:61:15: warning: 'trackInUse' defined but not used [-Wunused-variable]
+   61 | static double trackInUse = sim::TRACK_MM;
+      |               ^~~~~~~~~~

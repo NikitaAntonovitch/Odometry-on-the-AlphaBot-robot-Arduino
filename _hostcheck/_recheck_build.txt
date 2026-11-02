@@ -1,0 +1,3 @@
+lab1_stage7_faultrecovery/lab1_stage7_faultrecovery.ino:640:14: warning: 'float wheelTargetMM()' defined but not used [-Wunused-function]
+  640 | static float wheelTargetMM() {                       // commanded per-wheel distance magnitude
+      |              ^~~~~~~~~~~~~

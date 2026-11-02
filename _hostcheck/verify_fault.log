@@ -1,0 +1,199 @@
+# Stage 7 sketch — wheel-sync / fault-recovery verification log (29.10, desk)
+
+> Scope: the ADDITIVE fault layer in `lab1_stage7_faultrecovery.ino` (stage 6
+> source + fault layer; stage 6 files untouched). Blocks 1–2: host-side only
+> (MSYS2 g++ vs the virtual-robot harness) — hardware was still pending at
+> that time (closed 30.10, see the REAL-ROBOT block at the end). All numbers
+> in the sim blocks are real tool output, suite exit codes checked.
+
+## 1. Compile
+
+- host g++ (MSYS2, -Wall -Wextra), sketch + sim_fault.cpp: the ONLY warning is
+  the pre-existing `wheelTargetMM unused` (same warning exists for the frozen
+  stage6 sketch — verified, not introduced by stage 7).
+- regression suites recompiled clean against the touched harness.
+
+## 2. Harness changes (_hostcheck/Arduino.h — additive, defaults preserve frozen behaviour)
+
+1. `SLIP_L/SLIP_R` (default 0): per-wheel traction-loss injection. Ground
+   motion scales by (1-slip), encoder ticks by (1 + slip*(SLIP_FREE_GAIN-1)):
+   slip UNLOADS the motor, disc free-spins ~5x (stage-1 bench: 292 free vs
+   59 loaded cnt/s at pwm 130, data.txt). Zero default = bit-identical plant.
+2. `MAX_MM_S` became a runtime knob (default 300, the frozen nominal). ONLY
+   sim_fault sets 592.0 — the floor-calibrated value (stage-2/3 map: pwm 130 →
+   302 mm/s under load, which the sketch's PWM_PER_MMS is built on). First
+   attempt made it a global constant: stage4/5/wheelstop suites broke (they are
+   calibrated on the nominal plant) — reverted, knob pattern chosen instead.
+3. `simMicrosBump`: sub-tick micros spacing for inline edges, ACTIVE ONLY WHEN
+   SLIP_L/SLIP_R > 0. Without it the ISR's 800 µs debounce ate every second
+   back-to-back edge of a free-spinning disc (slip rate landed ON the detector
+   threshold — flaky pass/fail). Gated so normal-speed counting stays
+   bit-identical to the frozen suites' calibration.
+
+## 3. Sketch design delta vs stage 6 (all inside the straight path; turnStep untouched)
+
+- constants: 12 new #define-style tunables (see REPORT_STAGE7.md sec.2).
+- MotState gains M_HOLD. controlStep(): windowed detectors run FIRST:
+  1. one-wheel stall = RELATIVE ratio over 80 ms windows (guard-v2 pattern:
+     healthy <= 7 %, firm hold <= 13 %, threshold 20 %, partner >= 3 cnt),
+     3 consecutive windows -> brake() BOTH + M_HOLD. Chosen over an absolute
+     quiet-count threshold after the first sim run: absolute thresholds are
+     plant-specific (the nominal plant put pwm 85 at ~100 mm/s = stall-like);
+     the ratio detector is plant-independent and floor-proven.
+  2. both-wheels-dead windows -> `err: drive blocked` abort (the stage-6
+     STALL_MS watchdog only covers never-started: it refreshes on ANY count).
+  3. slip rate |d(cL-cR)|/100 ms > 8 cnt -> latch: progress = MIN(|cL|,|cR|),
+     corr = 0. Slip ALSO caught by the sustained detector (|diff| >= 20 mm for
+     2 windows) for slow leaks.
+- M_HOLD: alternating fwd/rev test pulses (110 pwm < 120 breakaway, yaw
+  cancels), 2-pulse cycles judge the stuck wheel; freed x2 cycles -> RESYNC:
+  progress := MIN(|cL|,|cR|), symmetry reference := post-event difference,
+  resume ORIGINAL target; 3 countless cycles -> abort. c/b abort from hold,
+  fresh G/L/R re-commands, S = last-fault record, p shows hold state.
+- spool grace 400 ms (or 10 counts moved) after start/resync: motor spool-up
+  yields <= ~2.5 cnt/80 ms which the ratio window cannot judge — without the
+  grace every drive aborted at t=240 ms (found in the first sim run).
+- protocol: only ADDITIONS (S key, M_HOLD state, hold/clear/abort lines).
+  G/L/R/K/J/m/c/b/t/e/z/s/p/x/h/? semantics unchanged; done/go/tturn format
+  unchanged; queue held frozen during hold (a queued command must not fight
+  the fault latch; a fresh typed G bypasses = re-command path).
+
+## 4. sim_fault.cpp — 29 checks, fails=0, exit 0
+
+| scenario | checks | verdict |
+|---|---|---|
+| S1 healthy G0.5 + S key state=none | 4 | done, got=495.5, poseX=498.0, NO false fault |
+| S2 one-wheel stall mid-drive -> hold -> resync | 7 | warn names L, MIN progress banked (~100 mm), sync line, NO yaw from pulses (poseY -2.8 mm), completes ORIGINAL 600 mm target (got=592.6) |
+| S3 hand-hold WITH jerk edges (guard-v1 killer) | 2 | detected via windowed displacement; c aborts cleanly from hold |
+| S4 re-command during hold (fresh G0.3) | 3 | go accepted, fresh drive completes (got=291.2) |
+| S5 both wheels freeze mid-drive | 4 | `err: drive blocked` abort, drift 0.57 mm (braked, not coast), recovery drive completes |
+| S6 full breakaway slip on L (5x free-spin) | 5 | rate warn fires, completes on MIN-progress (got=490.4, ground 77 mm), no overshoot from fake counts, S key names the slip |
+| S7 S key after faults | 1 | record printed |
+| S8 turn regression L90 | 3 | tturn completes, got=79.5 vs stage6-reference 77.5 (band 75-80 = the frozen turn machine's own sim kick-fold spread, verified by running the FROZEN stage6 binary in the same harness), no fault output in turns |
+
+## 5. Regression (frozen suites vs the touched harness, default plant)
+
+| suite | sketch | result |
+|---|---|---|
+| sim_stage2 | stage2 | fails=0 |
+| sim_stage3 | stage3 | fails=0 |
+| sim_stage4 | stage4 | fails=0 (baseline on old harness: fails=0 — unchanged) |
+| sim_stage5 | stage5 | fails=0 (baseline: fails=0 — unchanged) |
+| sim_stall | stage3 | PASS + PASS, exit 0 |
+| sim_wheelstop | stage3 | ALL SCENARIOS PASSED (fails=0) |
+
+## 6. Honest limits
+
+- Sim-only at the time of writing. The hold/resync cycle, pulse PWM (110 vs the
+  ~120 breakaway) and the slip thresholds are tuned against bench/free-spin
+  numbers; the real confirmation is the REPORT_STAGE7.md sec.5 test plan
+  (hold a wheel during G0.6; dust-sheet slip run; grab test).
+  -> CLOSED 30.10: real-robot session done, see the REAL-ROBOT block at the
+  end of this log and REPORT_STAGE7.md sec.5.1.
+- SLIP_DIFF_MAX_CNT 8 is derived from CORR_MAX_DRV + 6 % motor asym on the
+  calibrated map; on the real floor verify with the telemetry line during a
+  deliberate dust run before trusting the latch.
+- The stage3 working copy (wheel-guard v2, uncommitted) is untouched; stage 7
+  is a parallel implementation on the stage6 base with the same detector
+  philosophy but hold+resync instead of abort semantics.
+
+== RECHECK run (ad-hoc; current on-disk sources) ==
+Thu, Oct 29, 2026 11:18:34 PM
+source hashes at recheck time:
+8b2775065ec2c208fa6cc2c99dc07751 *lab1_stage7_faultrecovery/lab1_stage7_faultrecovery.ino
+9d1c5a57ed0cdd4e30b4231cee016275 *_hostcheck/sim_fault.cpp
+28b1244e463d3dc223e3100bec46feef *_hostcheck/Arduino.h
+[1] build fault suite, -Wall -Wextra
+    build: OK
+    warnings: 1
+      lab1_stage7_faultrecovery/lab1_stage7_faultrecovery.ino:640:14: warning: 'float wheelTargetMM()' defined but not used [-Wunused-function]
+[2] sim_fault suite (29 checks)
+    --- sim_fault summary: fails=0 ---
+[3] frozen regression pairs, default plant (plant-sensitivity guard)
+    stage4: == stage4 scenario finished, fails=0 ==
+    stage5: == stage5 scenario finished, fails=0 ==
+    wheelstop: ALL SCENARIOS PASSED (fails=0)
+[4] verdict
+RECHECK VERDICT: ALL GREEN (ad-hoc re-execution of the same suites)
+
+== RECHECK run (ad-hoc; current on-disk sources) ==
+Thu, Oct 29, 2026 11:19:17 PM
+source hashes at recheck time:
+8b2775065ec2c208fa6cc2c99dc07751 *lab1_stage7_faultrecovery/lab1_stage7_faultrecovery.ino
+9d1c5a57ed0cdd4e30b4231cee016275 *_hostcheck/sim_fault.cpp
+28b1244e463d3dc223e3100bec46feef *_hostcheck/Arduino.h
+[1] build fault suite, -Wall -Wextra
+    build: OK
+    warnings: 1
+      lab1_stage7_faultrecovery/lab1_stage7_faultrecovery.ino:640:14: warning: 'float wheelTargetMM()' defined but not used [-Wunused-function]
+[2] sim_fault suite (29 checks)
+    --- sim_fault summary: fails=0 ---
+[3] frozen regression pairs, default plant (plant-sensitivity guard)
+    stage4: == stage4 scenario finished, fails=0 ==
+    stage5: == stage5 scenario finished, fails=0 ==
+    wheelstop: ALL SCENARIOS PASSED (fails=0)
+[4] verdict
+RECHECK VERDICT: ALL GREEN (ad-hoc re-execution of the same suites)
+
+== REAL-ROBOT run (physical AlphaBot, operator fault injection) ==
+Fri, Oct 30, 2026 ~12:30 CEST
+firmware: lab1_stage7_faultrecovery.ino (on-disk source identical to the
+RECHECK blocks above — md5 8b2775065ec2c208fa6cc2c99dc07751 at recheck time)
+session: 3 runs of `G5.000m`; operator injects faults mid-drive
+(one-wheel stall = finger on tyre, slip = low-traction patch,
+both-wheels-blocked = chassis grab). Raw serial logs verbatim:
+
+Attempt 1 — COMPLETED
+  go cmd=G5.000m dir=fwd
+  warn: sustained 46.0mm wheel difference - progress = MIN(count), corr off
+  warn: R wheel stopped - both braked, holding (c=abort, S=status)
+  sync: fault cleared after 4200ms, resuming from 848.0mm of 5000.0mm (target unchanged)
+  warn: sustained 286.1mm wheel difference - progress = MIN(count), corr off
+  warn: L wheel stopped - both braked, holding (c=abort, S=status)
+  sync: fault cleared after 1680ms, resuming from 1946.4mm of 5000.0mm (target unchanged)
+  warn: sustained 35.8mm wheel difference - progress = MIN(count), corr off
+  done cmd=G5.000m got=5001.4mm err=1.4mm L=971cnt R=1016cnt
+
+Attempt 2 — ABORTED (correct safety behaviour)
+  go cmd=G5.000m dir=fwd
+  warn: slip L wheel - progress = MIN(count), corr off
+  warn: R wheel stopped - both braked, holding (c=abort, S=status)
+  sync: fault cleared after 3360ms, resuming from 715.2mm of 5000.0mm (target unchanged)
+  warn: sustained 194.1mm wheel difference - progress = MIN(count), corr off
+  warn: L wheel stopped - both braked, holding (c=abort, S=status)
+  sync: fault cleared after 1680ms, resuming from 1553.0mm of 5000.0mm (target unchanged)
+  warn: sustained 153.3mm wheel difference - progress = MIN(count), corr off
+  warn: R wheel stopped - both braked, holding (c=abort, S=status)
+  sync: fault cleared after 2520ms, resuming from 2401.1mm of 5000.0mm (target unchanged)
+  warn: sustained 143.0mm wheel difference - progress = MIN(count), corr off
+  err: drive blocked (both wheels) - aborting after 240ms of zero output
+
+Attempt 3 — COMPLETED
+  go cmd=G5.000m dir=fwd
+  warn: sustained 51.1mm wheel difference - progress = MIN(count), corr off
+  warn: R wheel stopped - both braked, holding (c=abort, S=status)
+  sync: fault cleared after 1680ms, resuming from 940.0mm of 5000.0mm (target unchanged)
+  warn: sustained 235.0mm wheel difference - progress = MIN(count), corr off
+  warn: L wheel stopped - both braked, holding (c=abort, S=status)
+  sync: fault cleared after 1680ms, resuming from 2574.8mm of 5000.0mm (target unchanged)
+  warn: sustained 194.1mm wheel difference - progress = MIN(count), corr off
+  done cmd=G5.000m got=4996.3mm err=-3.7mm L=940cnt R=986cnt
+
+summary (full analysis in REPORT_STAGE7.md sec.5.1):
+- accuracy: +1.4 / -3.7 mm on 5000 mm (mean -1.15 mm = -0.023 %,
+  |err| mean 2.55 mm = 0.051 %) — both inside ONE STOP_TOL_MM (10 mm)
+- recovery: 7/7 stall-holds cleared and resumed on the ORIGINAL target;
+  clear durations operator-driven (1680 ms = design minimum,
+  HOLD_CLR_WINDOWS x (HOLD_TEST_MS+HOLD_GAP_MS)); 7 slip latches, no
+  counter-chasing
+- abort: attempt 2 escalated via the both-wheels-dead detector
+  (N_STALL_STEPS x STALL_WIN_MS = 3 x 80 ms = 240 ms of zero output) —
+  CORRECT safety behaviour, not a regression (sim S5 analogue)
+- consistency: resume-point chains close to the final got= in both
+  completed runs; done-line got= is slip-safe MIN-progress minus the
+  recaptured symmetry reference, not the raw wheel mean (expected)
+
+REAL-ROBOT VERDICT: REPORT_STAGE7.md sec.5 is CLOSED BY MEASUREMENT —
+stall/slip/grab behaviours verified on the physical robot; sim-side
+results above stand as prior evidence. Classification: sim + real-robot
+verified.

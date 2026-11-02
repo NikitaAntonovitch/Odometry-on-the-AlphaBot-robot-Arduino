@@ -1,0 +1,8 @@
+In file included from <command-line>:
+./_hostcheck/Arduino.h: In function 'void sim::handTurn(double, double)':
+./_hostcheck/Arduino.h:198:10: warning: unused variable 'remL' [-Wunused-variable]
+  198 |   double remL = dL, remR = dR;                // remaining travel per wheel
+      |          ^~~~
+./_hostcheck/Arduino.h:198:21: warning: unused variable 'remR' [-Wunused-variable]
+  198 |   double remL = dL, remR = dR;                // remaining travel per wheel
+      |                     ^~~~

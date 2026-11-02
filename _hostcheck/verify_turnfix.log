@@ -1,0 +1,225 @@
+# Turn-controller fix — verification log (30.10, desk)
+
+> Scope: spin-turn under-rotation/asymmetry debugged to root cause in
+> `lab1_stage7_faultrecovery.ino` (turn machine byte-identical to frozen
+> stage 4/5/6). Straight controller, protocol, ISR layer, stage-7 fault
+> layer: UNTOUCHED. Stage-6/5/4/3/2 sketch files: UNTOUCHED.
+> All numbers below are real tool output (MSYS2 g++ + the _hostcheck
+> virtual-robot harness), exit codes checked.
+
+== BASELINE reproduction (pre-fix binary) ==
+build: OK, 1 warning (pre-existing wheelTargetMM unused, same as frozen)
+[diag probe, L90 in the harness]
+  tturn cmd=L90.0 got=77.5deg L=-20cnt R=20cnt coast=-2cnt     (sketch odometry)
+  [sim] pose heading=97.6deg | ticks L=-26 R=26                 (ground truth)
+  -> the sketch UNDER-reports its own rotation by ~20 deg; the robot's
+     real runs (69.8-71.7 deg on L90) show the same signature PLUS plant
+     asymmetry on top. sim_fault S8 pre-fix: got=79.5 (old band 75-80 =
+     the artifact banded as "expected" - band corrected this session).
+[telemetry through the stop, pre-fix]
+  tel prog=89.2 rem=0.8deg pwm=86  ->  tturn got=77.5
+  -> 11.7 deg of ALREADY-COUNTED rotation vanish between the last control
+     step and the result line. Lost AFTER the stop condition, in odometry.
+
+== ROOT CAUSE (three stacked defects, all in the post-stop turn path) ==
+1. stopTurn() fired an unconditional powered REVERSE kick (driveReverse,
+   KICK_PWM 95 / KICK_MS 60). driveReverse re-stamps dirL/dirR (isrL/isrR
+   sign edges by COMMANDED direction, .ino:215/222) while the wheels are
+   still spinning in the ORIGINAL direction -> every residual edge counts
+   BACKWARD. This is the constant per-turn deficit (angle-independent).
+2. the fold arithmetic double-counted the entire post-stop interval:
+   settlePhase()/T_KICK did coastL += encCountL() - coastSnapL, but
+   encCountL() is the LIVE counter that already contains that interval
+   -> final = drive + 2*(kick+coast). Sign-chaotic after defect 1.
+   (On the real robot this produced the "asymmetry": |R fwd| > |L back|,
+   sum NL+NR != 0 - the reported wheels disagreed with physical rotation.)
+3. the T_KICK->T_COAST handoff never refreshed lastCtrlMs, so after a
+   stop the 50 Hz scheduler starved turnStep until a queued straight
+   command re-armed the clock (masked in 1-command tests, visible in routes).
+
+H1 (e=(NL-NR) instead of NL+NR): REFUTED - .ino:851 uses (|cL|-|cR|),
+    magnitude equalisation, correct polarity for both wheel signs.
+H2 (symmetry not called): REFUTED - M_SPIN branch at .ino:849 runs every
+    T_RUN step; symGain initialised K_SYM 3.0 (.ino:278).
+H3 (turnDone coasts): REFUTED - all turn exits call brake() (.ino:660/696/741);
+    coast() is called only in setup() and the operator 'c' abort (.ino:256).
+H4 (stage-7 fault layer in turns): REFUTED - detectors arm ONLY in
+    beginDrive() (.ino:371); turnStart() never arms; loop() routes turns
+    to turnStep() only (.ino:1166-1170). Turn PWM floor 85 = PWM_MIN by
+    design, same floor the detector margins were calibrated around.
+ROOT CAUSE = defects 1+2+3 above (stop-kick sign flip + double-counted
+folds + scheduler starvation). The prompt's (a)/(b)/(c) subset: (a) the
+spin error FORMULA was already correct (no change needed - documented),
+(b) brake() was already called (the powered kick ON TOP of brake() was
+the bug - removed), (c) stage-7 was never active in turns (no change
+needed - documented).
+
+== THE FIX (turnStep machine only; +1 tunable, TURN_-prefixed per rules) ==
+- stopTurn(): brake() ONLY, no driveReverse kick; stop-instant snapshot
+  (stopSnapL/R) kept for the coast= diagnostic; settle-poll tracker
+  (coastSnapL/R) refreshed (never folded) so QUIET_MS/COAST_TMO still work.
+- settlePhase()/T_KICK folds DELETED: live counters are the whole truth.
+- turnStep(): lastCtrlMs = millis() on EVERY phase (shared-clock fix).
+- stop condition: rem <= STOP_TOL_DEG + TURN_STOP_LEAD_DEG (lead 7.8 deg =
+  measured brake residual 2 count-pairs + stop-step overshoot at the
+  PWM_MIN floor; recipe in the constant comment; 1 pair = 3.878 deg).
+- overshoot correction kick RETAINED but only from the settle phase AFTER
+  quiet (dir re-stamp harmless on still wheels) - now rare by construction.
+- coast= field now reports the honest post-stop residual (already inside
+  got=; information only).
+- telemetry hook behind #if defined(TELEMETRY_TURN) && TELEMETRY_TURN:
+  tturn_tel tgt_ticks/NL/NR/pwmL/pwmR/e/corr once per T_RUN step. NOT
+  defined for acceptance builds (verified: undefined build has zero
+  tel output; -DTELEMETRY_TURN=1 build compiles clean and streams).
+
+== target_ticks math (alternative root cause, ruled out) ==
+theta(rad) = 90 * pi/180 = 1.5708; per-wheel arc = b*theta/2 =
+151 * 1.5708 / 2 = 118.60 mm; target_ticks = 118.60 / K_MM 5.1087 =
+23.2 counts. Firmware: wheelTargetMM() = track*rad/2 (identical formula,
+only unused because turnStep drives by deg directly - same 23.2 target
+lands via rem <= tol). Robot data: healthy pairs land on 23.2 cnt grids
+(46.4/2 = 23.2) - matches.
+
+== ISOLATION battery (post-fix binary, harness, verbatim) ==
+== isolation battery (final binary) ==
+tturn cmd=L90.0 got=93.0deg L=-24cnt R=24cnt coast=2cnt
+tturn cmd=L45.0 got=46.5deg L=-12cnt R=12cnt coast=-3cnt
+tturn cmd=L15.0 got=11.6deg L=-3cnt R=3cnt coast=1cnt
+tturn cmd=R90.0 got=-93.0deg L=24cnt R=-24cnt coast=-2cnt
+tturn cmd=R45.0 got=-46.5deg L=12cnt R=-12cnt coast=3cnt
+acceptance: every |got-target| <= 5 deg (worst 3.0); |NL+NR| = 0 on ALL five
+(L15's 3/3 pair = quantisation floor at the 1.94 deg/count grid).
+NOTE: harness numbers; the ROBOT must repeat this battery before the full
+route (plant asymmetry ~6% was masked in sim by the symmetric plant).
+
+== ROUTE (harness, post-fix) ==
+go cmd=G0.800m dir=fwd
+done cmd=G0.800m got=797.0mm err=-3.0mm L=156cnt R=156cnt
+go cmd=L90.0deg mode=spin
+tturn cmd=L90.0 got=91.1deg L=-22cnt R=25cnt coast=2cnt
+go cmd=G1.200m dir=fwd
+done cmd=G1.200m got=1192.9mm err=-7.1mm L=233cnt R=234cnt
+go cmd=R45.0deg mode=spin
+tturn cmd=R45.0 got=-46.5deg L=15cnt R=-9cnt coast=-2cnt
+go cmd=G0.600m dir=fwd
+done cmd=G0.600m got=592.6mm err=-7.4mm L=116cnt R=116cnt
+[sim] pose x=1485.7mm y=1623.0mm heading=44.3deg (route legs compose to
+odometry-frame end (1196.0, 1608.8) vs phase-1 predicted B (1224.3, 1624.3)
+= 32.2 mm miss; pre-fix reference reconstruction: 166 mm). In-sim only;
+3x robot repetition still owed (B-zone box +-15 cm).
+
+== STRAIGHT regression guard (post-fix binary, verbatim) ==
+done cmd=G0.800m got=797.0mm err=-3.0mm L=156cnt R=156cnt
+done cmd=G1.200m got=1190.3mm err=-9.7mm L=233cnt R=233cnt
+done cmd=G0.600m got=592.6mm err=-7.4mm L=116cnt R=116cnt
+[sim] pose x=2595.4mm y=19.0mm heading=0.6deg | ticks L=508 R=508
+|L-R| <= 1 tick throughout - byte-identical to the frozen pre-fix values.
+
+== SUITES ==
+[1] sim_fault (stage7 sketch): 29 checks, fails=0
+    S8 now honest: got=89.2 deg L=-23 R=23 |NL+NR|=0 (old 75-80 band
+    banded the artifact; corrected to 85-95 + symmetry check)
+[2] frozen suites, CORRECT per-stage pairs (suite <-> its own sketch):
+    sim_stage2  <- lab1_stage2_encoders.ino : fails=0
+    sim_stage3  <- lab1_stage3_straight.ino : fails=0
+    sim_stage4  <- lab1_stage4_turns.ino    : fails=0
+    sim_stage5  <- lab1_stage5_protocol.ino : fails=0
+    sim_stall   <- lab1_stage3_straight.ino : PASS + PASS, exit 0
+    sim_wheelstop <- lab1_stage3_straight.ino : ALL SCENARIOS PASSED (fails=0)
+    (method note: pairing every suite against the stage-7 sketch produces
+    mass failures from PROTOCOL mismatch - stage3's 'F' letter etc; that
+    was a tester error, corrected above; no code implication)
+[3] -DTELEMETRY_TURN=1 build: compiles clean (0 errors), tturn_tel lines
+    stream with tgt_ticks=11.6 on L45 (= 45deg target math: 45*pi/180*151/2/
+    5.1087 = 11.6); undefined-symbol build: no tel output, no size cost.
+
+== source hashes at verify time ==
+17ad50fd93ebaf16f0debc1964fb3a1a *lab1_stage7_faultrecovery/lab1_stage7_faultrecovery.ino
+0199fb46173ad487570a4442fe080c44 *_hostcheck/sim_fault.cpp
+28b1244e463d3dc223e3100bec46feef *_hostcheck/Arduino.h
+cfbbc59c4687277c0ce2b81c188b0435 *_hostcheck/diag_turn.cpp
+
+== VERDICT ==
+TURN FIX VERIFIED IN SILICO: root cause reproduced, fixed, regression-clean.
+The robot MUST still run: the 5-turn isolation battery, then the route x3
+(B zone). TURN_STOP_LEAD_DEG 7.8 is a SIM-calibrated value - re-measure on
+the robot per the recipe in the constant comment if the plant differs.
+
+== AD-HOC re-verify (fresh evidence pass, NOT a canonical suite) ==
+Fri Oct 30 2026 15:13:37
+PASS: source has no leftover debug
+PASS: sketch has TELEMETRY_TURN guard
+PASS: build diag probe (no telemetry) (warnings: 2)
+PASS: build diag probe (-DTELEMETRY_TURN=1)
+PASS: build sim_fault
+FAIL: isolation L90 (no tturn line)
+FAIL: isolation L45 (no tturn line)
+FAIL: isolation L15 (no tturn line)
+FAIL: isolation R90 (no tturn line)
+FAIL: isolation R45 (no tturn line)
+PASS: straight regression G0.8/G1.2/G0.6 |L-R|<=2 (got=797.0 L=156 R=156; got=1190.3 L=233 R=233; got=592.6 L=116 R=116)
+PASS: route 5/5 result lines (lines=5)
+PASS: sim_fault suite fails=0 (exit=0 fails=0)
+PASS: telemetry compiled OUT (no tturn_tel)
+PASS: telemetry compiled IN (tturn_tel streams)
+AD-HOC VERDICT: FAIL (15 checks, 5 fail) - scripted rerun of the changed behavior
+
+== AD-HOC re-verify (fresh evidence pass, NOT a canonical suite) ==
+Fri Oct 30 2026 15:14:30  (script v2: v1's result-line regex was double-escaped - its 5 isolation FAILs were a script bug, rerun below)
+PASS: source has no leftover debug
+PASS: sketch has TELEMETRY_TURN guard
+PASS: build diag probe (no telemetry) (warnings: 2)
+PASS: build diag probe (-DTELEMETRY_TURN=1)
+PASS: build sim_fault
+FAIL: isolation L90 (no tturn line in 251 bytes)
+FAIL: isolation L45 (no tturn line in 251 bytes)
+FAIL: isolation L15 (no tturn line in 246 bytes)
+FAIL: isolation R90 (no tturn line in 255 bytes)
+FAIL: isolation R45 (no tturn line in 253 bytes)
+PASS: straight regression G0.8/G1.2/G0.6 |L-R|<=2 (got=797.0 L=156 R=156; got=1190.3 L=233 R=233; got=592.6 L=116 R=116)
+PASS: route 5/5 result lines (lines=5)
+PASS: sim_fault suite fails=0 (exit=0 fails=0)
+PASS: telemetry compiled OUT (no tturn_tel)
+PASS: telemetry compiled IN (tturn_tel streams)
+AD-HOC VERDICT: FAIL (15 checks, 5 fail) - scripted rerun of the changed behavior
+
+== AD-HOC re-verify (fresh evidence pass, NOT a canonical suite) ==
+Fri Oct 30 2026 15:19:20  (script v3: v1/v2 result-line regex had a spurious 'deg' after the command
+angle - those 10 isolation FAILs were script bugs, not firmware bugs; rerun below)
+PASS: source has no leftover debug
+PASS: sketch has TELEMETRY_TURN guard
+PASS: build diag probe (no telemetry) (warnings: 2)
+PASS: build diag probe (-DTELEMETRY_TURN=1)
+PASS: build sim_fault
+PASS: isolation L90: got=93.0 L=-24 R=24 (acc=True sym=True)
+PASS: isolation L45: got=46.5 L=-12 R=12 (acc=True sym=True)
+PASS: isolation L15: got=11.6 L=-3 R=3 (acc=True sym=True)
+PASS: isolation R90: got=-93.0 L=24 R=-24 (acc=True sym=True)
+PASS: isolation R45: got=-46.5 L=12 R=-12 (acc=True sym=True)
+PASS: straight regression G0.8/G1.2/G0.6 |L-R|<=2 (got=797.0 L=156 R=156; got=1190.3 L=233 R=233; got=592.6 L=116 R=116)
+PASS: route 5/5 result lines (lines=5)
+PASS: sim_fault suite fails=0 (exit=0 fails=0)
+PASS: telemetry compiled OUT (no tturn_tel)
+PASS: telemetry compiled IN (tturn_tel streams)
+AD-HOC VERDICT: PASS (15 checks, 0 fail) - scripted rerun of the changed behavior
+
+== AD-HOC re-verify (fresh evidence pass, NOT a canonical suite) ==
+Fri Oct 30 2026 15:20:56  (script v4: rerun against current sources - diag_turn.cpp lost its unused
+`turns` flag AFTER the previous 15/15 pass, which staled that evidence)
+PASS: source has no leftover debug
+PASS: sketch has TELEMETRY_TURN guard
+PASS: probe has no unused flag (current source)
+PASS: build diag probe (no telemetry) (warnings: 1)
+PASS: build diag probe (-DTELEMETRY_TURN=1)
+PASS: build sim_fault
+PASS: isolation L90: got=93.0 L=-24 R=24 (acc=True sym=True)
+PASS: isolation L45: got=46.5 L=-12 R=12 (acc=True sym=True)
+PASS: isolation L15: got=11.6 L=-3 R=3 (acc=True sym=True)
+PASS: isolation R90: got=-93.0 L=24 R=-24 (acc=True sym=True)
+PASS: isolation R45: got=-46.5 L=12 R=-12 (acc=True sym=True)
+PASS: straight regression G0.8/G1.2/G0.6 |L-R|<=2 (got=797.0 L=156 R=156; got=1190.3 L=233 R=233; got=592.6 L=116 R=116)
+PASS: route 5/5 result lines (lines=5)
+PASS: sim_fault suite fails=0 (exit=0 fails=0)
+PASS: telemetry compiled OUT (no tturn_tel)
+PASS: telemetry compiled IN (tturn_tel streams)
+AD-HOC VERDICT: PASS (16 checks, 0 fail) - scripted rerun of the changed behavior

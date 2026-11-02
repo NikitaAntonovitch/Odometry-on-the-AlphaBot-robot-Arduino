@@ -1,0 +1,34 @@
+stage4 v3: k=5.109 spin=151 pivot=145 [prov]
+h = menu
+[sim] == L90 spin basic ==
+[sim] PASS: L90 spin: done line with got=93.0 (want ~90)
+[sim] PASS: L90 spin: true heading 87.5 deg (ccw+, near +90)
+[sim] PASS: L90 spin: left wheel backward, right forward (ccw spin)
+[sim] == R90 spin ==
+[sim] PASS: R90 spin: got=-93.0 (want ~-90), heading -87.5
+[sim] == angle sweep spin ==
+[sim] PASS: L15 spin: got=11.6 (cmd 15 +-4.5 = 1 count)
+[sim] PASS: L30 spin: got=27.1 (cmd 30 +-4.5 = 1 count)
+[sim] PASS: L45 spin: got=40.7 (cmd 45 +-4.5 = 1 count)
+[sim] PASS: R15 spin: got=-15.5 (cmd 15 +-4.5 = 1 count)
+[sim] PASS: R45 spin: got=-46.5 (cmd 45 +-4.5 = 1 count)
+[sim] == L1440 (4 revs) ==
+[sim] PASS: L1440: got=1436.4 deg (want ~1440, multi-rev calib probe)
+[sim] == pivot turns ==
+[sim] PASS: L45 pivot: got=44.4 (want ~45), left wheel planted=yes
+[sim] PASS: L45 pivot: right wheel ~25 counts (double the spin share)
+[sim] PASS: R90 pivot: got=-90.8 (want ~-90), right wheel planted (|0|<=2)
+[sim] == spin symmetry equalisation ==
+[sim] PASS: L360 K3: got=356.7, |L|-|R| per-turn = 1 cnt (<=3 with equalisation)
+[sim] == range rules ==
+[sim] PASS: L3: rejected (below 5 deg)
+[sim] PASS: L2000: rejected (above 1440 deg)
+[sim] PASS: bare L: rejected
+[sim] PASS: L-45: turns LEFT 45 (abs rule)
+[sim] == manual abort ==
+[sim] PASS: abort: no result line after manual stop
+[sim] PASS: abort: robot actually stopped
+[sim] == scope note ==
+[sim] PASS: stage4 sketch is turns-only (F/B not implemented here - stages merge in stage 6)
+
+== stage4 scenario finished, fails=0 ==

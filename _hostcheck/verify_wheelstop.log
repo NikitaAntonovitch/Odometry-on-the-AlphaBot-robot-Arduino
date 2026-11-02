@@ -1,0 +1,72 @@
+# Stage 3 sketch — wheel guard v2 verification log (28.10, supersedes v1)
+
+> Feature (user request, refined after a real-robot complaint): "when I hold one
+> wheel by hand the second wheel must stop immediately and distance counting
+> must freeze". v1 (silence-only, drive-only) did NOT survive the hand-hold
+> case; v2 below is the fix. Verified host-side (MSYS2 g++ vs the
+> virtual-robot harness); hardware session still pending.
+
+## 1. Why v1 failed the real-robot test
+
+- v1 detector = "one wheel produces no edges for 400 ms". A HAND HOLD is not a
+  clean stall: the held wheel jerks and squeezes out occasional edges, resetting
+  the silence timer forever. The sim's perfect zero-edge stall could not see it.
+- v1 also only ran during commanded F/B drives — manual mode (key 1/2) was
+  unwatched, and the stage-2 coast-window freeze stops counting 2 s after a
+  manual keypress, so the guard had no live data there at all.
+
+## 2. v2 design (lab1_stage3_straight.ino)
+
+Two detectors, either one brakes BOTH wheels immediately, prints
+`err: wheel stopped (L|R) - both stopped, distance frozen`, and latches:
+
+1. SILENCE: one wheel edge-less > WHEEL_STOP_MS (300 ms) while the partner
+   edges — clean stall (motor wire off, rope, one wheel below its own dead band).
+2. RATIO: over GUARD_WIN_MS (200 ms), one wheel moved < GUARD_RATIO_PCT (20 %)
+   of the partner's path while the partner covered >= GUARD_MIN_MOVE (5 cnt) —
+   catches the jerky hand-hold: jerk edges reset the silence timer but cannot
+   fake displacement. Margins: healthy asymmetry <= 7 % (stage 2), a firm hold
+   slips <= 1 cnt/200 ms -> <= 13 % at the slowest real speed. Threshold 20 %
+   sits between.
+
+Sizing note for a later stage-4/6 port: the ratio detector MUST be suspended in
+pivot mode (one wheel legitimately at zero).
+
+## 3. Integration changes
+
+- Guard check runs every loop() pass, active whenever the drive is COMMANDED
+  (drive command refreshes lastDriveMs; manual keys now refresh it too — manual
+  mode keeps the encoder coast window open, stage-2 pattern).
+- Guard is quiet when the drive is off (hand push on a parked robot, bench mode
+  `x`) and re-arms on wheelGuardArm() at every motion start, `z`, `1`, `2`.
+- One-shot latch: no duplicate err lines from run-on edges after the stop.
+- loop() ends the mode on a trip: commanded drive aborted (no done line),
+  manualOn cleared.
+
+## 4. Suite _hostcheck/sim_wheelstop.cpp — 8 scenarios, ALL PASS, fails=0
+
+| scenario | verdict |
+|---|---|
+| S1 right wheel clean stall mid-drive (F2000) | fires, names R, counters frozen, |v|<2 mm/s, lateral drift < 40 mm |
+| S2 left wheel clean stall | fires, names L |
+| S3 healthy F500 | no false positive |
+| S4 recovery | next drive completes with a done line |
+| S5 backward drive stall | fires with negative counts |
+| S6 HAND HOLD with jerk edges (the v1 killer) | ratio detector fires within 4 s despite 1 jerk cnt/250 ms through the real ISR path |
+| S7 MANUAL mode hand-hold | fires; pivot distance limited |
+| S8 hand push with drive OFF / bench mode | no trip; bench counting unaffected |
+
+## 5. Regression
+
+- sim_stage3.cpp full suite: fails=0.
+- sim_stall (both-wheels watchdog): PASS, PASS.
+
+## 6. Honest limits
+
+- Sim-only; the real-robot confirmation (hold a wheel during `F300` / manual `1`)
+  is still owed. If the real floor shows jerk rates above ~1 cnt/200 ms the
+  ratio threshold (20 %) is the knob to raise, at the cost of margin against
+  the 7 % asymmetry.
+- Stages 5/6 sketches do NOT carry this guard (frozen binaries untouched).
+- Compile: -Wall -Wextra, zero warnings from the sketch and the harness
+  (remL/remR dead vars removed from the harness header while touching it).
