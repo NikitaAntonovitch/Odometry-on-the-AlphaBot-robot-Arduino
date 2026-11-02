@@ -35,20 +35,22 @@ import statistics as st
 UNMEASURED = "<<unmeasured>>"
 
 # markdown phase-2 row: | run | start_pos | x | y | heading | cmds | aborts |
+# \s* around every inner pipe: markdown cells are written "| 12 | -8 |", not "|12|-8|"
 MD_ROW_RE = re.compile(
-    r"^\|\s*(\d+)\s*\|"          # run number
-    r"\|(.*?)\|"                  # start_pos
-    r"\|(.*?)\|"                  # end_pos_x_mm
-    r"\|(.*?)\|"                  # end_pos_y_mm
-    r"\|(.*?)\|"                  # heading_err_deg
-    r"\|(.*?)\|"                  # commands_executed
-    r"\|(.*?)\|", re.IGNORECASE)
+    r"^\|\s*(\d+)\s*"            # run number
+    r"\|\s*(.*?)\s*"             # start_pos
+    r"\|\s*(.*?)\s*"             # end_pos_x_mm
+    r"\|\s*(.*?)\s*"             # end_pos_y_mm
+    r"\|\s*(.*?)\s*"             # heading_err_deg
+    r"\|\s*(.*?)\s*"             # commands_executed
+    r"\|\s*(.*?)\s*\|", re.IGNORECASE)
 
 
 def cell(v):
     v = (v or "").strip()
     if not v or v == UNMEASURED or v.upper().startswith("ABORT"):
         return None
+    v = v.replace("\u2212", "-")   # U+2212: reports/editors write −12, float() only knows '-'
     try:
         return float(v)
     except ValueError:
@@ -182,6 +184,8 @@ def main():
             print(f"INSUFFICIENT DATA: {a.csv} has no filled rows"
                   + (f" (skipped: {', '.join(skipped)})" if skipped else ""))
             return 0
+        print(f"[{a.csv}] parsed {len(pts)} filled run(s)"
+              + (f"; skipped unfilled/aborted: {', '.join(skipped)}" if skipped else ""))
         report(pts, a.odo, a.tape, a.label)
         return 0
 
