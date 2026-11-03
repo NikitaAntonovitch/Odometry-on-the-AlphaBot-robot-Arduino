@@ -13,6 +13,15 @@ session writes it. No number in this file is evidence.
 > L90 pivotL reps (z pressed between them, operator-confirmed) flagged as a
 > possible attractor/buffer artefact — kept verbatim, not spread. TRACK_PIVOT
 > 145 remains provisional — no 360° multi-rev calibration this session.
+> **Spin continuation (same power-on, z before every run):** L90 reps 2–4
+> and R90 rep 2 added. L90 REPS 2–3 ANOMALY: `mode=spin` printed but the
+> behaviour matches pivotL (left wheel 0/−2 ticks). NOT a confirmed
+> mode-state leak: the go line prints the LIVE tmode (execTurn :923–928)
+> and printed `spin` on all four; the left motor is electrically fine
+> (R90 rep 2: L=28). Working theory: left-wheel breakaway failure inside
+> spin mode after the pivot block; the direction switch (R90) preceded
+> the perfect rep 4 (byte-identical to the isolation run). See
+> NONDET_ANALYSIS.md.
 
 Firmware under test: `lab1_stage6_autonomous.ino` (stage6-v1-FROZEN logic,
 identical turn controller). k = 5.1087 mm/cnt, b_spin = 151.0 (confirmed),
@@ -107,12 +116,12 @@ stage-4 controller applies the symmetry controller to spin only, by design.
 | 45 | R | 4 | 45.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 45 | R | 5 | 45.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 90 | L | 1 | 90.0 | +89.2 | <<unmeasured>> | -22 | 24 | 2 | -0.8 | <<unmeasured>> |
-| 90 | L | 2 | 90.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
-| 90 | L | 3 | 90.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
-| 90 | L | 4 | 90.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
+| 90 | L | 2 | 90.0 | +85.3 | <<unmeasured>> | 0 | 44 | 1 | -4.7 | <<unmeasured>> |
+| 90 | L | 3 | 90.0 | +87.2 | <<unmeasured>> | -2 | 43 | 2 | -2.8 | <<unmeasured>> |
+| 90 | L | 4 | 90.0 | +89.2 | <<unmeasured>> | -22 | 24 | 2 | -0.8 | <<unmeasured>> |
 | 90 | L | 5 | 90.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 90 | R | 1 | 90.0 | -89.2 | <<unmeasured>> | 26 | -20 | 2 | +0.8 | <<unmeasured>> |
-| 90 | R | 2 | 90.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
+| 90 | R | 2 | 90.0 | -87.2 | <<unmeasured>> | 28 | -17 | 2 | +2.8 | <<unmeasured>> |
 | 90 | R | 3 | 90.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 90 | R | 4 | 90.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 90 | R | 5 | 90.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
