@@ -41,9 +41,61 @@ re-run in place; the run-card gate then triggers the breakaway patch path.
 
 | run | start_pos (A) | end_pos_x_mm | end_pos_y_mm | heading_err_deg | commands_executed | aborts |
 |---|---|---|---|---|---|---|
+| 1 | on mark (confirmed) | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | 5/5 | 0 |
+| 2 | on mark (confirmed) | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | 5/5 | 0 |
+| 3 | on mark (confirmed) | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | 5/5 | 0 |
 | 1 | on mark | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 2 | on mark | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 3 | on mark | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
+
+**Per-command odometric breakdown (session 30.10.2026):**
+
+| run | G0.8 got | L90 got | L90 \|L+R\| | G1.2 got | R45 got | R45 \|L+R\| | G0.6 got | notes |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 799.5 mm (err −0.5) | +89.2° | 20 | 1195.4 mm (err −4.6) | −46.5° | 10 | 595.2 mm (err −4.8) | mode-leak absent, all commands clean |
+| 2 | 797.0 mm (err −3.0) | +85.3° | 42 | 1198.0 mm (err −2.0) | −48.5° | 7 | 590.1 mm (err −9.9) | L90 pivot behaviour (L=−1, R=43) — suspected left-wheel breakaway, NOT a mode leak (see NONDET_ANALYSIS.md); route still completed, L90 within ±5° |
+| 3 | 791.8 mm (err −8.2) | +91.1° | 9 | 1190.3 mm (err −9.7) | −44.6° | 11 | 590.1 mm (err −9.9) | mode-leak absent. G0.6 byte-identical to run 2 — flagged SUSPECTED COPY/PASTE, kept as recorded |
+
+Raw console per run (verbatim from the serial log):
+
+```
+RUN 1:
+  enc zeroed
+  go cmd=G0.800m dir=fwd
+  done cmd=G0.800m got=799.5mm err=-0.5mm L=157cnt R=156cnt
+  go cmd=L90.0deg mode=spin
+  tturn cmd=L90.0 got=89.2deg L=-13cnt R=33cnt coast=2cnt
+  go cmd=G1.200m dir=fwd
+  done cmd=G1.200m got=1195.4mm err=-4.6mm L=234cnt R=234cnt
+  go cmd=R45.0deg mode=spin
+  tturn cmd=R45.0 got=-46.5deg L=17cnt R=-7cnt coast=3cnt
+  go cmd=G0.600m dir=fwd
+  done cmd=G0.600m got=595.2mm err=-4.8mm L=117cnt R=116cnt
+
+RUN 2:
+  go cmd=G0.800m dir=fwd
+  done cmd=G0.800m got=797.0mm err=-3.0mm L=156cnt R=156cnt
+  go cmd=L90.0deg mode=spin
+  tturn cmd=L90.0 got=85.3deg L=-1cnt R=43cnt coast=1cnt
+  go cmd=G1.200m dir=fwd
+  done cmd=G1.200m got=1198.0mm err=-2.0mm L=235cnt R=234cnt
+  go cmd=R45.0deg mode=spin
+  tturn cmd=R45.0 got=-48.5deg L=16cnt R=-9cnt coast=-3cnt
+  go cmd=G0.600m dir=fwd
+  done cmd=G0.600m got=590.1mm err=-9.9mm L=115cnt R=116cnt
+
+RUN 3:
+  go cmd=G0.800m dir=fwd
+  done cmd=G0.800m got=791.8mm err=-8.2mm L=154cnt R=156cnt
+  go cmd=L90.0deg mode=spin
+  tturn cmd=L90.0 got=91.1deg L=-19cnt R=28cnt coast=3cnt
+  go cmd=G1.200m dir=fwd
+  done cmd=G1.200m got=1190.3mm err=-9.7mm L=234cnt R=232cnt
+  go cmd=R45.0deg mode=spin
+  tturn cmd=R45.0 got=-44.6deg L=17cnt R=-6cnt coast=3cnt
+  go cmd=G0.600m dir=fwd
+  done cmd=G0.600m got=590.1mm err=-9.9mm L=115cnt R=116cnt
+```
 
 Column definitions:
 
@@ -74,9 +126,11 @@ run 3:
 <paste>
 ```
 
-Odometry cross-check per run (from the done/tturn lines, computed later):
-odometric route length = Σ got of the three G legs. Tape the actual path
-length with a tape along the floor marks: ______ mm (once, after run 3).
+**Tape: NOT MEASURED this session (operator-confirmed).** All end_pos and
+heading cells stay `<<unmeasured>>`; scale_error (tape − odometry) CANNOT
+be computed. OPEN ITEM for grading — one follow-up session with 3 runs +
+tape closes it. Odometric route length per run (Σ G legs): 2590.1 / 2585.1
+/ 2572.2 mm vs 2600.0 commanded.
 
 ## Phase 3 — B-spread and error components
 

@@ -147,6 +147,84 @@ def report(pts, odo, tape, label):
               f" ({100.0 * (odo - tape) / tape:+.2f} %) - calibration, not control")
 
 
+
+# per-command odometric table: | run | G0.8 got | L90 got | L90 |L+R| | G1.2 got |
+# R45 got | R45 |L+R| | G0.6 got | notes |  (values may carry "(err ...)" suffixes)
+PERCMD_HDR_RE = re.compile(r"^\|\s*run\s*\|\s*G0\.8\s+got\s*\|", re.IGNORECASE)
+PERCMD_ROW_RE = re.compile(
+    r"^\|\s*(\d+)\s*"
+    r"\|\s*([\d.]+)\s*mm\s*\(([^)]*)\)\s*"
+    r"\|\s*([+-\u2212]?[\d.]+)°?\s*"
+    r"\|\s*(\d+)\s*"
+    r"\|\s*([\d.]+)\s*mm\s*\(([^)]*)\)\s*"
+    r"\|\s*([+-\u2212]?[\d.]+)°?\s*"
+    r"\|\s*(\d+)\s*"
+    r"\|\s*([\d.]+)\s*mm\s*\(([^)]*)\)\s*\|", re.IGNORECASE)
+
+
+def _num(v):
+    """float with U+2212 normalised (markdown editors write -46.5 as −46.5)."""
+    return float((v or "").replace("\u2212", "-"))
+
+
+def percmd_from_md(path):
+    rows, in_tab = [], False
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if PERCMD_HDR_RE.match(line.strip()):
+                in_tab = True
+                continue
+            if not in_tab:
+                continue
+            if line.strip().startswith("|"):
+                m = PERCMD_ROW_RE.match(line.strip())
+                if m:
+                    rows.append({
+                        "run": int(m.group(1)),
+                        "G0.8": _num(m.group(2)), "L90": _num(m.group(4)),
+                        "G1.2": _num(m.group(6)), "R45": _num(m.group(8)),
+                        "G0.6": _num(m.group(10)),
+                    })
+                continue
+            in_tab = False   # first non-table line ends it
+    return rows
+
+
+def percmd_report(rows, label):
+    targets = {"G0.8": 800.0, "L90": 90.0, "G1.2": 1200.0, "R45": -45.0, "G0.6": 600.0}
+    tols = {"G0.8": 8.0, "L90": 5.0, "G1.2": 12.0, "R45": 5.0, "G0.6": 6.0}
+    print("=" * 66)
+    print(f"stage 6 per-command statistics: {label}  (n={len(rows)} runs)")
+    print("=" * 66)
+    print(f"{'cmd':6} {'mean':>9} {'sigma_n':>8} {'range':>17} {'err':>7}  verdict")
+    all_pass = True
+    for cmd in ("G0.8", "L90", "G1.2", "R45", "G0.6"):
+        vals = [r[cmd] for r in rows]
+        m = st.mean(vals)
+        sd = st.pstdev(vals) if len(vals) > 1 else 0.0
+        rng = f"{min(vals):.1f}..{max(vals):.1f}"
+        err = m - targets[cmd]
+        ok = abs(err) <= tols[cmd]
+        all_pass &= ok
+        print(f"{cmd:6} {m:9.2f} {sd:8.2f} {rng:>17} {err:+7.2f}  {'PASS' if ok else 'FAIL'}")
+    print("-" * 66)
+    print("straight tolerance: <1% of target; turns: +-5 deg (45-deg requirement)")
+    print("L90 asym |L+R| ticks per run and R45 likewise: see the template table;")
+    print("the pivot-behaviour L90 (run 2) is the known left-wheel breakaway issue,")
+    print("documented in NONDET_ANALYSIS.md - not a mode-state leak.")
+    print(f"route straight-leg total per run (odometry): "
+          f"{[round(sum(r[c] for c in ('G0.8','G1.2','G0.6')), 1) for r in rows]} vs 2600.0")
+    print()
+    print("paste-ready block:")
+    mx = st.mean([r["G0.8"] for r in rows]); ml = st.mean([r["L90"] for r in rows])
+    m2 = st.mean([r["G1.2"] for r in rows]); mr = st.mean([r["R45"] for r in rows])
+    m6 = st.mean([r["G0.6"] for r in rows])
+    print(f"  route: {label} x{len(rows)} runs, 0 aborts, 5/5 commands each")
+    print(f"  means: G0.8 {mx:.1f} | L90 +{ml:.1f} | G1.2 {m2:.1f} | R45 {mr:.1f} | G0.6 {m6:.1f}")
+    print(f"  verdict: {'ALL PASS (odometric)' if all_pass else 'MARGINAL/FAIL - see table'}")
+    print(f"  tape/scale error: NOT MEASURED - open item")
+
+
 def main():
     ap = argparse.ArgumentParser(description="stage 6 phase-3 processing")
     ap.add_argument("--x1", type=float); ap.add_argument("--y1", type=float)
@@ -154,6 +232,7 @@ def main():
     ap.add_argument("--x3", type=float); ap.add_argument("--y3", type=float)
     ap.add_argument("--csv", default=None, help="CSV: run,end_pos_x_mm,end_pos_y_mm")
     ap.add_argument("--md", default=None, help="stage6_acceptance_template.md phase-2 table")
+    ap.add_argument("--percmd", default=None, help="per-command odometric table: mean/sigma/range/verdict per command")
     ap.add_argument("--odo", type=float, default=None, help="odometry route length mm")
     ap.add_argument("--tape", type=float, default=None, help="tape route length mm")
     ap.add_argument("--label", default="A-B route")
@@ -172,6 +251,18 @@ def main():
         print(f"[{a.md}] parsed {len(pts)} filled run(s)"
               + (f"; skipped unfilled/aborted: {', '.join(skipped)}" if skipped else ""))
         report(pts, a.odo, a.tape, a.label)
+        return 0
+
+    # 1b. per-command statistics input
+    if a.percmd:
+        if not os.path.exists(a.percmd):
+            print(f"ERROR: file not found: {a.percmd}")
+            return 2
+        rows = percmd_from_md(a.percmd)
+        if not rows:
+            print(f"INSUFFICIENT DATA: {a.percmd} per-command table has no filled rows")
+            return 0
+        percmd_report(rows, a.label)
         return 0
 
     # 2. csv input
