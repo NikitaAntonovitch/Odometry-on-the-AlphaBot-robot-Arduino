@@ -3,6 +3,17 @@
 Status: TEMPLATE ONLY — every value is `<<unmeasured>>` until the robot
 session writes it. No number in this file is evidence.
 
+> **Session data 30.10.2026 (first pass — isolation battery, spin mode, one rep
+> per angle, protractor not used):** the four rows marked with real console
+> values below come from this session. R45 was not run — its rep-1 row reads
+> `<<not yet run>>` (PENDING). Sign convention as printed by the firmware:
+> got= is signed, + = CCW (left), − = CW (right); N_L/N_R signed per command.
+> **Pivot continuation (same session):** L135 rep 1 with telemetry; the
+> stationary wheel slipped 3 ticks (ASYMMETRY, noted in-row); three identical
+> L90 pivotL reps (z pressed between them, operator-confirmed) flagged as a
+> possible attractor/buffer artefact — kept verbatim, not spread. TRACK_PIVOT
+> 145 remains provisional — no 360° multi-rev calibration this session.
+
 Firmware under test: `lab1_stage6_autonomous.ino` (stage6-v1-FROZEN logic,
 identical turn controller). k = 5.1087 mm/cnt, b_spin = 151.0 (confirmed),
 b_pivot = 145.0 (PROVISIONAL — this session confirms or replaces it),
@@ -65,7 +76,7 @@ stage-4 controller applies the symmetry controller to spin only, by design.
 
 | angle | dir | rep | target_deg | achieved_odometry_deg | measured_protractor_deg | N_L | N_R | coast_cnt | err_odom (deg) | err_tape (deg) |
 |---|---|---|---|---|---|---|---|---|---|---|
-| 15 | L | 1 | 15.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
+| 15 | L | 1 | 15.0 | +15.5 | <<unmeasured>> | -3 | 5 | 2 | +0.5 | <<unmeasured>> |
 | 15 | L | 2 | 15.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 15 | L | 3 | 15.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 15 | L | 4 | 15.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
@@ -85,22 +96,22 @@ stage-4 controller applies the symmetry controller to spin only, by design.
 | 30 | R | 3 | 30.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 30 | R | 4 | 30.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 30 | R | 5 | 30.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
-| 45 | L | 1 | 45.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
+| 45 | L | 1 | 45.0 | +40.7 | <<unmeasured>> | -4 | 17 | 1 | -4.3 | <<unmeasured>> |
 | 45 | L | 2 | 45.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 45 | L | 3 | 45.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 45 | L | 4 | 45.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 45 | L | 5 | 45.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
-| 45 | R | 1 | 45.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
+| 45 | R | 1 | 45.0 | <<not yet run>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 45 | R | 2 | 45.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 45 | R | 3 | 45.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 45 | R | 4 | 45.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 45 | R | 5 | 45.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
-| 90 | L | 1 | 90.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
+| 90 | L | 1 | 90.0 | +89.2 | <<unmeasured>> | -22 | 24 | 2 | -0.8 | <<unmeasured>> |
 | 90 | L | 2 | 90.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 90 | L | 3 | 90.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 90 | L | 4 | 90.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 90 | L | 5 | 90.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
-| 90 | R | 1 | 90.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
+| 90 | R | 1 | 90.0 | -89.2 | <<unmeasured>> | 26 | -20 | 2 | +0.8 | <<unmeasured>> |
 | 90 | R | 2 | 90.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 90 | R | 3 | 90.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 90 | R | 4 | 90.0 | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
@@ -163,6 +174,27 @@ Track factor = mean(|got|)/360 × 145.0 → new b_pivot = ______ mm.
 (If |mean E| ≤ 2° the 145 value is CONFIRMED; otherwise the computed value
 becomes the new provisional and goes in the calibration audit note — do not
 edit the .ino on the floor.)
+
+
+### Off-plan pivot rows (session 30.10.2026 continuation — L90/L135, telemetry on)
+
+> These angles are outside the 15/30/45 template grid but were run for the
+> TRACK_PIVOT investigation. Kept here verbatim; `z` WAS pressed between the
+> three identical L90 reps (operator-confirmed). Rows kept as measured — the
+> identical reps 2–4 are flagged as a possible attractor/buffer artefact but
+> NOT spread or deleted.
+
+| angle | dir | rep | target_deg | achieved_odometry_deg | measured_protractor_deg | N_L | N_R | coast_cnt | err_odom (deg) | err_tape (deg) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 90 | L | 1 | 90.0 | +84.8 | <<unmeasured>> | 0 | 42 | 1 | -5.2 | <<unmeasured>> |
+| 90 | L | 2 | 90.0 | +82.8 | <<unmeasured>> | 0 | 41 | 0 | -7.2 | <<unmeasured>> |
+| 90 | L | 3 | 90.0 | +82.8 | <<unmeasured>> | 0 | 41 | 0 | -7.2 | <<unmeasured>> |
+| 90 | L | 4 | 90.0 | +82.8 | <<unmeasured>> | 0 | 41 | 0 | -7.2 | <<unmeasured>> |
+| 135 | L | 1 | 135.0 | +131.2 | <<unmeasured>> | 3 | 65 | 2 | -3.8 | <<unmeasured>> |
+
+Note on L135 rep 1: ASYMMETRY — the "stationary" left wheel slipped 3 ticks
+(~15 mm): not a true pivot. Systematic under-rotation −3.8°; see
+L45_ANOMALY_ANALYSIS.md and the session root-cause notes.
 
 ## Protractor convention (agreed before the first row)
 

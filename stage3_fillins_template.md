@@ -139,8 +139,22 @@ print("saved stage3_tel.png")
 # usage: python stage3_tel_plot.py K3 stage3_tel_K3.log K6 stage3_tel_K6.log
 ```
 
+> **Session 30.10.2026 — TWO G0.5 telemetry runs, BOTH at the default gain
+> (K_SYM 3.0): this VIOLATES the "two gains" requirement — the second-gain
+> capture is still `<<unmeasured>>`. What the two same-gain runs DO show:
+> oscillation amplitude TRIPLED between runs (run 1 peak-to-peak ±10.2 mm →
+> run 2 ±15.3 mm; run 2 start already asymmetric pwmL=85/pwmR=102 at the
+> first control step). Same firmware, same gain, same commanded distance →
+> the growth points at environmental/state drift between runs (battery
+> voltage, floor texture, operator start placement), NOT at a gain change.
+> Flagged in the report; final done line still in tolerance
+> (got=493.0, err=−7.0, L=96 R=97). Verbatim streams live in the session
+> log; the capture files named below are still unfilled.
+
 Captured files: K3 log ______ (rows: `<<unmeasured>>`), K6 log ______
-(rows: `<<unmeasured>>`). Checkpoint satisfied when both PNGs exist and the
+(rows: `<<unmeasured>>` — the 30.10 runs above were BOTH at the default
+gain, so they do not satisfy the two-gain requirement; a genuine K6 (or
+K0) telemetry capture is still owed). Checkpoint satisfied when both PNGs exist and the
 K6 trace visibly shows the clamp behaviour (flat-topped corr, weaving) or
 its absence — either outcome is a documented result.
 
