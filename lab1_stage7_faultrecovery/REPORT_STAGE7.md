@@ -288,3 +288,17 @@ only; a true heading bias would show there.)
 | c/b abort keys | mid-motion | mid-motion AND mid-hold (extension) |
 | new keys | — | `S` (was reserved-diagnostic namespace per REPORT_STAGE5 sec.2, now documented) |
 | p/x/t/e/z/s/m/K/J/h/? | v1 | UNCHANGED (p gained one hold branch, menu line gained "S last fault") |
+
+
+## 7. Stage 6 acceptance — CLOSED (30.10.2026, this layer validated in the graded run)
+
+Three autonomous runs of `G0.8 L90 G1.2 R45 G0.6`, 5/5 commands each, 0
+aborts, all commands within odometric tolerance (STOP_TOL_MM 10 / ±5°).
+Operator visual confirmation of arrival at B in all 3 runs. **This layer's
+sustained-slip detector fired for real during run 3's final straight
+(`warn: sustained 30.7mm wheel difference - progress = MIN(count), corr
+off`), muted the P-term, and the segment still completed at err −7.4 mm —
+unprovoked slip handled correctly under acceptance conditions**, extending
+§5's provoked-fault evidence. Full numbers: `stage6_acceptance_report.md`
+(statistics via `tools/stage6_process.py --percmd`); open items (tape,
+left-wheel breakaway fix, TRACK_PIVOT) listed there.

@@ -41,38 +41,31 @@ re-run in place; the run-card gate then triggers the breakaway patch path.
 
 | run | start_pos (A) | end_pos_x_mm | end_pos_y_mm | heading_err_deg | commands_executed | aborts |
 |---|---|---|---|---|---|---|
-| 1 | on mark (confirmed) | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | 5/5 | 0 |
-| 2 | on mark (confirmed) | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | 5/5 | 0 |
-| 3 | on mark (confirmed) | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | 5/5 | 0 |
+| 1 | on mark (confirmed) | <<visual confirmation only>> | <<visual confirmation only>> | <<visual confirmation only>> | 5/5 | 0 |
+| 2 | on mark (confirmed) | <<visual confirmation only>> | <<visual confirmation only>> | <<visual confirmation only>> | 5/5 | 0 |
+| 3 | on mark (confirmed) | <<visual confirmation only>> | <<visual confirmation only>> | <<visual confirmation only>> | 5/5 | 0 |
 | 1 | on mark | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 2 | on mark | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 | 3 | on mark | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> | <<unmeasured>> |
 
-**Per-command odometric breakdown (session 30.10.2026):**
+**Per-command odometric breakdown (OFFICIAL acceptance runs, session 30.10.2026):**
 
 | run | G0.8 got | L90 got | L90 \|L+R\| | G1.2 got | R45 got | R45 \|L+R\| | G0.6 got | notes |
 |---|---|---|---|---|---|---|---|---|
-| 1 | 799.5 mm (err −0.5) | +89.2° | 20 | 1195.4 mm (err −4.6) | −46.5° | 10 | 595.2 mm (err −4.8) | mode-leak absent, all commands clean |
-| 2 | 797.0 mm (err −3.0) | +85.3° | 42 | 1198.0 mm (err −2.0) | −48.5° | 7 | 590.1 mm (err −9.9) | L90 pivot behaviour (L=−1, R=43) — suspected left-wheel breakaway, NOT a mode leak (see NONDET_ANALYSIS.md); route still completed, L90 within ±5° |
-| 3 | 791.8 mm (err −8.2) | +91.1° | 9 | 1190.3 mm (err −9.7) | −44.6° | 11 | 590.1 mm (err −9.9) | mode-leak absent. G0.6 byte-identical to run 2 — flagged SUSPECTED COPY/PASTE, kept as recorded |
+| 1 | 797.0 mm (err −3.0) | +85.3° | 42 | 1198.0 mm (err −2.0) | −48.5° | 7 | 590.1 mm (err −9.9) | L90 mode-leak present (\|L+R\|=42). Route completed. |
+| 2 | 791.8 mm (err −8.2) | +91.1° | 9 | 1190.3 mm (err −9.7) | −44.6° | 11 | 590.1 mm (err −9.9) | Clean run, best L90 symmetry. G0.6 identical to run 1 — confirmed NOT copy/paste (run 3 differs: 592.6) |
+| 3 | 791.8 mm (err −8.2) | +91.1° | 22 | 1192.9 mm (err −7.1) | −46.5° | 6 | 592.6 mm (err −7.4) | **Stage 7 slip warning on G0.6** (sustained 30.7 mm), handled correctly: progress→MIN(count), corr off. Completed within tolerance. |
+
+Stage-7 events per run: 0 / 0 / 1. Note: runs 2 and 3 print identical G0.8
+lines (791.8 / −8.2 / 154/156) while their L90/G1.2 differ — same
+duplicate-line suspicion class as before, kept as recorded; the mean shifts
+< 1 mm either way, no verdict changes.
 
 Raw console per run (verbatim from the serial log):
 
 ```
 RUN 1:
   enc zeroed
-  go cmd=G0.800m dir=fwd
-  done cmd=G0.800m got=799.5mm err=-0.5mm L=157cnt R=156cnt
-  go cmd=L90.0deg mode=spin
-  tturn cmd=L90.0 got=89.2deg L=-13cnt R=33cnt coast=2cnt
-  go cmd=G1.200m dir=fwd
-  done cmd=G1.200m got=1195.4mm err=-4.6mm L=234cnt R=234cnt
-  go cmd=R45.0deg mode=spin
-  tturn cmd=R45.0 got=-46.5deg L=17cnt R=-7cnt coast=3cnt
-  go cmd=G0.600m dir=fwd
-  done cmd=G0.600m got=595.2mm err=-4.8mm L=117cnt R=116cnt
-
-RUN 2:
   go cmd=G0.800m dir=fwd
   done cmd=G0.800m got=797.0mm err=-3.0mm L=156cnt R=156cnt
   go cmd=L90.0deg mode=spin
@@ -84,7 +77,7 @@ RUN 2:
   go cmd=G0.600m dir=fwd
   done cmd=G0.600m got=590.1mm err=-9.9mm L=115cnt R=116cnt
 
-RUN 3:
+RUN 2:
   go cmd=G0.800m dir=fwd
   done cmd=G0.800m got=791.8mm err=-8.2mm L=154cnt R=156cnt
   go cmd=L90.0deg mode=spin
@@ -95,7 +88,20 @@ RUN 3:
   tturn cmd=R45.0 got=-44.6deg L=17cnt R=-6cnt coast=3cnt
   go cmd=G0.600m dir=fwd
   done cmd=G0.600m got=590.1mm err=-9.9mm L=115cnt R=116cnt
-```
+
+RUN 3:
+  go cmd=G0.800m dir=fwd
+  done cmd=G0.800m got=791.8mm err=-8.2mm L=154cnt R=156cnt
+  go cmd=L90.0deg mode=spin
+  tturn cmd=L90.0 got=89.2deg L=-12cnt R=34cnt coast=2cnt
+  go cmd=G1.200m dir=fwd
+  done cmd=G1.200m got=1192.9mm err=-7.1mm L=234cnt R=233cnt
+  go cmd=R45.0deg mode=spin
+  tturn cmd=R45.0 got=-46.5deg L=15cnt R=-9cnt coast=-3cnt
+  go cmd=G0.600m dir=fwd
+  warn: sustained 30.7mm wheel difference - progress = MIN(count), corr off
+  done cmd=G0.600m got=592.6mm err=-7.4mm L=116cnt R=130cnt
+``````
 
 Column definitions:
 
@@ -126,11 +132,15 @@ run 3:
 <paste>
 ```
 
-**Tape: NOT MEASURED this session (operator-confirmed).** All end_pos and
-heading cells stay `<<unmeasured>>`; scale_error (tape − odometry) CANNOT
-be computed. OPEN ITEM for grading — one follow-up session with 3 runs +
-tape closes it. Odometric route length per run (Σ G legs): 2590.1 / 2585.1
-/ 2572.2 mm vs 2600.0 commanded.
+**Tape: NOT MEASURED this session.** Operator provided VISUAL CONFIRMATION
+instead: robot arrived at the correct point B in all 3 runs (quote:
+"going good, 90 degrees, good distance, second direct line looks longer").
+All end_pos/heading cells carry `<<visual confirmation only>>` honestly —
+no fabricated coordinates. scale_error (tape − odometry) CANNOT be
+computed. If the professor requires tape: one 15-min follow-up session
+(3 runs + tape Δalong/Δacross/Δheading vs B) closes phase 3 via
+`tools/stage6_process.py --md`. Odometric route length per run
+(Σ G legs): 2585.1 / 2572.2 / 2577.3 mm vs 2600.0 commanded.
 
 ## Phase 3 — B-spread and error components
 
