@@ -24,6 +24,7 @@ using std::min; using std::max;
 #define RISING 2
 #define FALLING 3
 #define digitalPinToInterrupt(p) ((p) == 2 ? 0 : ((p) == 3 ? 1 : 255))
+#define LED_BUILTIN 13
 
 // interrupt control: host is single threaded (isrs run inline inside stepPhysics),
 // so these are no-ops; SREG is modelled as a variable so the sketch's save/restore code compiles

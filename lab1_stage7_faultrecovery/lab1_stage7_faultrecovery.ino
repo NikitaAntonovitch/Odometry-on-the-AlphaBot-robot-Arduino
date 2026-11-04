@@ -1019,6 +1019,20 @@ void handleChar(char ch) {
       Serial.print(F("turn mode="));
       Serial.println(tmode == M_SPIN ? F("spin") : (tmode == M_PIVOT_L ? F("pivotL (about left wheel)") : F("pivotR (about right wheel)")));
       break;
+    case 'W': case 'w': {                            // wait <sec>, LED blink = unplug window
+      float sec = Serial.parseFloat();               // eats chars up to the number: keep a space after W<sec>
+      unsigned long ms = (unsigned long)(sec * 1000.0);
+      Serial.print("WAIT ");
+      Serial.print(ms);
+      Serial.println(" ms — unplug USB now");
+      unsigned long start = millis();
+      while (millis() - start < ms) {
+        digitalWrite(LED_BUILTIN, ((millis() - start) / 250) % 2);
+      }
+      digitalWrite(LED_BUILTIN, LOW);
+      Serial.println("GO");
+      break;
+    }
     case 'c':                                        // abort + coast: works MID-MOTION and
       if (mot == M_RUN || mot == M_HOLD) stopMotion();  // MID-HOLD (stage 7: abort out of
       if (trn == T_RUN) stopTurn();                  // the fault latch too) and flushes the

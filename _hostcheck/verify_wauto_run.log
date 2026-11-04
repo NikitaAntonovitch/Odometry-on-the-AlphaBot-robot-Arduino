@@ -1,0 +1,14 @@
+PASS: A1 w case reached + parsed (WAIT line)
+PASS: A2 GO printed after wait
+PASS: A3 following G dispatches via normal protocol
+PASS: A4 following G completes
+PASS: A5 G0.2 accuracy intact after W
+PASS: B1 uppercase W works
+PASS: B2 GO after uppercase W
+PASS: B3 turn after W completes (tturn line)
+PASS: C1 z still works
+PASS: C2 p still works
+PASS: C3 t toggle still works
+
+--- hermes-verify-wauto: fails=0 ---
+suite exit: 0
