@@ -76,6 +76,7 @@ static State state = FOLLOWING;
 
 static int  searchSpinSpeed   = 120;
 static unsigned long searchTimeoutMs = 3000;
+static const unsigned long SEARCH_TIMEOUT_DEFAULT_MS = 3000;   // Bug 1 fix: T0 falls back to this
 static unsigned int  foundReadingsNeeded = 3;
 static bool searchEnabled = true;       // search only runs if true - safety
 static bool forceSearch = false;        // set by 'F', acts for ONE tick
@@ -447,15 +448,10 @@ void stateMachineStep(int e) {
   }
 
   // ===== SEARCHING =====
-  if (!searchEnabled) {
-    motorsStop();
-    if (!searchDisabledMsgDone) {
-      Serial.println(F("SEARCH DISABLED - stopped"));
-      searchDisabledMsgDone = true;
-    }
-    return;
-  }
-
+  // Bug 1 fix: the line-return check and the return-to-FOLLOWING run REGARDLESS
+  // of searchEnabled - with the old structure (early return when disabled) the
+  // state could never leave SEARCHING once entered with searchEnabled=0
+  // (stuck 45 min at school). searchEnabled now gates ONLY the search motion.
   if (!lineLost(e)) {
     // one good reading is NOT enough: during a fast spin the strip can sweep across
     // the line accidentally (assignment warning) - require N consecutive readings
@@ -468,24 +464,43 @@ void stateMachineStep(int e) {
       lastGoodU = 0;
       digitalWrite(PIN_LED, LOW);
       if (trace) Serial.println(F("->FOLLOW"));
+      return;
+    }
+    if (!searchEnabled) {
+      // line seen but not yet for enough consecutive ticks: hold still, keep counting
+      motorsStop();
+      if (!searchDisabledMsgDone) {
+        Serial.println(F("SEARCH DISABLED - stopped"));
+        searchDisabledMsgDone = true;
+      }
     }
     return;
   }
 
   // still lost
   searchFoundCount = 0;
-  if (millis() - searchStartTime > searchTimeoutMs) {
-    // TIMEOUT DECISION: stop and wait - do not widen, do not reverse. Safe limiting
-    // behaviour for the "end of the line" case; a robot must not spin forever.
-    motorsStop();
-    if (!searchTimedOut) {
-      Serial.println(F("SEARCH TIMEOUT - stopped"));
-      searchTimedOut = true;
+  if (searchEnabled) {
+    // Bug 1 fix: a zero timeout must fall back to the default, never "instant stop"
+    unsigned long effectiveTimeout = (searchTimeoutMs == 0) ? SEARCH_TIMEOUT_DEFAULT_MS : searchTimeoutMs;
+    if (millis() - searchStartTime > effectiveTimeout) {
+      // TIMEOUT DECISION: stop and wait - do not widen, do not reverse. Safe limiting
+      // behaviour for the "end of the line" case; a robot must not spin forever.
+      motorsStop();
+      if (!searchTimedOut) {
+        Serial.println(F("SEARCH TIMEOUT - stopped"));
+        searchTimedOut = true;
+      }
+      return;
     }
-    return;
-  }
 
-  applySearchMovement(lastSeenSide);
+    applySearchMovement(lastSeenSide);
+  } else {
+    motorsStop();
+    if (!searchDisabledMsgDone) {
+      Serial.println(F("SEARCH DISABLED - stopped"));
+      searchDisabledMsgDone = true;
+    }
+  }
 }
 
 /* ===== fixed-period tick (Stages 3-6 merged) ===== */
@@ -688,7 +703,13 @@ void handleLine(const char* buf) {
     }
     case 'T':
       searchTimeoutMs = strtoul(arg, NULL, 10);
-      Serial.print(F("searchTimeoutMs=")); Serial.println(searchTimeoutMs);
+      if (searchTimeoutMs == 0) {   // Bug 1 fix: T0 must not disable the timeout stop
+        searchTimeoutMs = SEARCH_TIMEOUT_DEFAULT_MS;
+        Serial.print(F("T0 refused - restored default searchTimeoutMs="));
+        Serial.println(searchTimeoutMs);
+      } else {
+        Serial.print(F("searchTimeoutMs=")); Serial.println(searchTimeoutMs);
+      }
       break;
     case 'n':
       foundReadingsNeeded = (unsigned int)atoi(arg);
