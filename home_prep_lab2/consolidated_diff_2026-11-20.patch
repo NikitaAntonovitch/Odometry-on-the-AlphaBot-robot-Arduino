@@ -1,0 +1,478 @@
+--- _github_upload/lab2_stage6_track/lab2_stage6_track.ino	2026-11-13 18:52:57.661173500 +0100
++++ lab2_stage6_track/lab2_stage6_track.ino	2026-11-20 17:09:00.364864900 +0100
+@@ -19,10 +19,11 @@
+ #include <EEPROM.h>
+ 
+ /* ===== EEPROM calibration persistence (added post-stage-6) =====
++   Layout v3 (2026-11-20: signs + gains added; v2 2026-11-19: lineThresh).
+    Address  Size  Content
+    -------  ----  ---------------------------------
+-   0        1     MAGIC = 0xA5  (means EEPROM has valid data)
+-   1        1     white_line (0 or 1, as unsigned char)
++   0        1     MAGIC = 0xA6  (v3; any other value = no valid data)
++   1        1     white_line (0 or 1, as unsigned char; inert since raw-path change)
+    2        2     calibratedMin[0]  (unsigned int, little-endian)
+    4        2     calibratedMin[1]
+    6        2     calibratedMin[2]
+@@ -33,12 +34,21 @@
+    16       2     calibratedMax[2]
+    18       2     calibratedMax[3]
+    20       2     calibratedMax[4]
+-   22       1     CRC8 checksum (over bytes 1..21)
++   22       2     lineThresh (int, little-endian)
++   24       1     SIGN_L (int8_t as u8: 0xFF = -1, 0x01 = +1)
++   25       1     SIGN_R (same encoding)
++   26       4     kp (float)
++   30       4     ki (float)
++   34       4     kd (float)
++   38       2     baseSpeed (int)
++   40       1     CRC8 checksum (over bytes 1..39)
+    -------------------------------
+-   Total: 23 bytes used, 1001 bytes free on UNO (1024 byte EEPROM).
++   Total: 41 bytes used, 983 bytes free on UNO (1024 byte EEPROM).
++   v1/v2 saves are rejected by the magic change (0xA5/23-25 B layouts never
++   match 0xA6) plus per-field range guards - never load garbage.
+    Writes happen ONLY on the explicit 'E' command (EEPROM ~100k cycles). */
+ 
+-static const uint8_t  CALIB_EEPROM_MAGIC = 0xA5;
++static const uint8_t  CALIB_EEPROM_MAGIC = 0xA6;   // layout v3 (2026-11-20)
+ static const int      CALIB_EEPROM_ADDR  = 0;   // start address
+ 
+ // Simple CRC8 (Polynomial 0x07, initial 0x00, no final XOR) - same as Dallas/Maxim 1-Wire CRC.
+@@ -50,11 +60,39 @@
+   return crc;
+ }
+ 
+-static const unsigned long SERIAL_BAUD = 9600;
++static const unsigned long SERIAL_BAUD = 9600;    // baud MUST match monitor
+ static const uint8_t NUM_SENSORS = 5;             // Stage 1
+ static const int SETPOINT = 2000;                 // Stage 2
+ static const int LOST_LIMIT = 2000;               // Stage 2
+-static bool white_line = false;   // set from Stage 1 polarity measurement; flip with 'w' if unsure at school
++// raw-ADC reference levels (measured 2026-11-19): black line ~400, grey floor
++// ~800, white stripe ~980. Threshold = midpoint black/grey -> grey and white
++// get ZERO weight, only the narrow black line drives the position.
++static const int BLACK_RAW = 400;
++static const int GREY_RAW  = 800;
++static int lineThresh = (BLACK_RAW + GREY_RAW) / 2;   // 600; live: t<val>, saved with E
++static const int LINE_LOST_MIN_WEIGHT = 30;   // sum of w below this = no line under strip
++static int lastGoodLinePos = 2000;            // direction memory for the lost-line sentinel
++// POLARITY (flipped 2026-11-19). Diagnostic that forced the flip: line under
++// sensor 3 (RIGHT of centre, raw 721 = darkest reading) was reported as
++// linePos=1680 LEFT - the weighted average was chasing the bright background
++// pixels, so the controller steered AWAY from the dark line into the white gap.
++// TRAPS - read before flipping this back:
++//  - TRSensors.cpp inverts every value (1000-value) when white_line is FALSE,
++//    even though its own header comment claims the opposite (doc-vs-code bug,
++//    good demo answer). On this robot the dark line reads LOW raw, so
++//    white_line=0 pointed AT the line (HW-verified 09-11) and white_line=1
++//    points at the background. If avoidance behaviour ever returns, flip back
++//    at runtime with 'w' and verify with 'p' (side must match the real side) -
++//    no recompile needed.
++//  - 'E' saves white_line into EEPROM byte 1 and setup() auto-loads it BEFORE
++//    the defaults print, so a saved value overrides this initializer on every
++//    boot (reflashing does NOT reset it). 'X' clears the block; 'W'+'E'
++//    re-saves with the polarity currently active.
++// 2026-11-19: readError() switched to the raw-threshold path (lineThresh) and
++// no longer calls trs.readLine(), so this flag no longer affects line position
++// or crossing detection. Kept (still saved by 'E') only for EEPROM byte-1
++// layout compatibility.
++static bool white_line = true;   // runtime flip: 'w'; persist across resets: 'E'
+ 
+ static const int PWM_MAX = 255;                   // Stage 3
+ static const int PWM_MIN = 85;                    // LAB1 dead band 75 + margin
+@@ -115,8 +153,9 @@
+ static const uint8_t PIN_ENA = 5,  PIN_IN1 = A0, PIN_IN2 = A1;   // left pwm + dir
+ static const uint8_t PIN_ENB = 6,  PIN_IN3 = A2, PIN_IN4 = A3;   // right pwm + dir
+ static const uint8_t PIN_LED = 8;                                // search=on, crossing=blink
+-static const int8_t SIGN_L = -1;   // floor-verified 14.10: bridge-fwd rolls backward
+-static const int8_t SIGN_R = -1;
++static int8_t SIGN_L = -1;   // floor-verified 14.10 on the OLD robot - WRONG on the
++static int8_t SIGN_R = -1;   // current unit (both-wheels-fwd = rotation). Runtime
++                             // flip: 'j' left / 'J' right; save with 'E'; verify with 'M'
+ 
+ TRSensors trs = TRSensors();
+ unsigned int sensorValues[NUM_SENSORS];
+@@ -124,10 +163,33 @@
+ static int lastLinePos = 0;
+ static int lastU = 0;   // correction of THIS tick, for the trace row
+ 
+-/* ===== Stage 2: measurement (unchanged) ===== */
+-// SIGNED int — never change this type, the lost-line sign depends on it
++/* ===== Stage 2: measurement (raw-threshold path, replaced trs.readLine() 2026-11-19) =====
++   The track is a NARROW BLACK LINE on a WIDE WHITE STRIPE on GREY FLOOR. The
++   library's readLine() weighted average cannot separate "partly dark grey" from
++   "black line", so the robot centred on the white stripe. This path:
++   - weights ONLY dark readings: w = lineThresh - raw (black ~400 -> w ~200);
++     grey ~800 and white ~980 are above the threshold and contribute nothing
++   - same 0..4000 position scale, same error = linePos - SETPOINT convention
++   - calibration NOT used on this path (W/E/L/X still work, just unused here)
++   SIGNED int - never change this type, the lost-line sign depends on it. */
+ int readError() {
+-  lastLinePos = trs.readLine(sensorValues, white_line);
++  trs.AnalogRead(rawValues);
++  long sum = 0;
++  long weighted = 0;
++  for (uint8_t i = 0; i < NUM_SENSORS; i++) {
++    int w = lineThresh - (int)rawValues[i];   // dark sensor = big weight
++    if (w < 0) w = 0;                         // grey/white floor: zero weight
++    sum += w;
++    weighted += (long)w * (i * 1000);
++  }
++  if (sum < LINE_LOST_MIN_WEIGHT) {
++    // library sentinel convention kept: -1 last seen LEFT, 4001 last seen RIGHT,
++    // so lineLost() and the search-side derivation work unchanged
++    lastLinePos = (lastGoodLinePos < SETPOINT) ? -1 : 4001;
++  } else {
++    lastLinePos = (int)(weighted / sum);
++    lastGoodLinePos = lastLinePos;            // direction memory for the sentinel
++  }
+   return lastLinePos - SETPOINT;
+ }
+ 
+@@ -223,6 +285,54 @@
+   digitalWrite(PIN_IN4, LOW);
+ }
+ 
++/* ===== 'M' motor self-test (no sensors, no PID, no search) =====
++   Wheels lifted. ~1.5 s per step with a stop between.
++   NOT gated by dryRun: calls motorL/motorR DIRECTLY, so it exercises the raw
++   motor layer exactly as applyCorrection() does. The only gate is on the 'M'
++   command itself: refused while the wheels are live on the floor (safety).
++   PWM: 100, NOT 60. 60 sat BELOW the motor dead band (~75, PWM_MIN=85), so
++   the driver received PWM but the wheels never moved - M looked dead while
++   g (base=90) still drove. That mismatch was the bench mystery of 20.11.
++   PASS = forward on "LEFT fwd", forward on "RIGHT fwd", body-forward (not
++   spin) on "BOTH fwd". Wrong direction on one wheel -> 'j'/'J' -> M again. */
++void motorSelfTest() {
++  static const int TEST_PWM = 100;   // above dead band + PWM_MIN; still slow and catchable
++  static const unsigned long STEP_MS = 1500;
++  static const unsigned long GAP_MS = 700;
++
++  motorsStop();
++  Serial.print(F("MOTOR TEST 1/4: LEFT fwd   ENA=")); Serial.print(TEST_PWM);
++  Serial.print(F(" pwm_out=")); Serial.println(SIGN_L * TEST_PWM);
++  motorL(TEST_PWM);
++  delay(STEP_MS);
++  motorsStop();
++  delay(GAP_MS);
++
++  Serial.print(F("MOTOR TEST 2/4: RIGHT fwd  ENB=")); Serial.print(TEST_PWM);
++  Serial.print(F(" pwm_out=")); Serial.println(SIGN_R * TEST_PWM);
++  motorR(TEST_PWM);
++  delay(STEP_MS);
++  motorsStop();
++  delay(GAP_MS);
++
++  Serial.print(F("MOTOR TEST 3/4: BOTH fwd   pwm_out=")); Serial.println(SIGN_L * TEST_PWM);
++  motorL(TEST_PWM);
++  motorR(TEST_PWM);
++  delay(STEP_MS);
++  motorsStop();
++  delay(GAP_MS);
++
++  Serial.print(F("MOTOR TEST 4/4: BOTH back  pwm_out=")); Serial.println(-SIGN_L * TEST_PWM);
++  motorL(-TEST_PWM);
++  motorR(-TEST_PWM);
++  delay(STEP_MS);
++  motorsStop();
++  Serial.println(F("MOTOR TEST DONE - wheels must have rolled fwd,fwd,fwd,back"));
++  Serial.println(F("no motion at all? battery/jumpers; one wheel backward? j/J then M again"));
++  lastTick = millis();   // no catch-up tick burst after the ~9 s block (same as 'W')
++  prevTickMs = 0;        // skip one dt sample
++}
++
+ /* ===== Stage 1: calibration core (shared by setup and 'W') ===== */
+ void runCalibration() {
+   // 400 calls x 10 reads each = ~10 s; strip must sweep line + background in that window
+@@ -252,29 +362,63 @@
+ bool calibrationLoadFromEEPROM() {
+   uint8_t magic;
+   EEPROM.get(CALIB_EEPROM_ADDR, magic);
+-  if (magic != CALIB_EEPROM_MAGIC) return false;
++  if (magic != CALIB_EEPROM_MAGIC) return false;   // v1(0xA5)/v2(0xA5) never match v3(0xA6)
+ 
+   // read the full block into temporaries, verify CRC, then commit
+-  uint8_t wl;
++  uint8_t wl, sl, sr;
+   unsigned int cmin[NUM_SENSORS], cmax[NUM_SENSORS];
++  int lt;
++  float kpS, kiS, kdS;
++  int baseS;
+   uint8_t crcStored, crcCalc;
+ 
+   EEPROM.get(CALIB_EEPROM_ADDR + 1, wl);
+   for (int i = 0; i < NUM_SENSORS; i++) EEPROM.get(CALIB_EEPROM_ADDR + 2 + i * 2, cmin[i]);
+   for (int i = 0; i < NUM_SENSORS; i++) EEPROM.get(CALIB_EEPROM_ADDR + 12 + i * 2, cmax[i]);
+-  EEPROM.get(CALIB_EEPROM_ADDR + 22, crcStored);
++  EEPROM.get(CALIB_EEPROM_ADDR + 22, lt);
++  EEPROM.get(CALIB_EEPROM_ADDR + 24, sl);
++  EEPROM.get(CALIB_EEPROM_ADDR + 25, sr);
++  EEPROM.get(CALIB_EEPROM_ADDR + 26, kpS);
++  EEPROM.get(CALIB_EEPROM_ADDR + 30, kiS);
++  EEPROM.get(CALIB_EEPROM_ADDR + 34, kdS);
++  EEPROM.get(CALIB_EEPROM_ADDR + 38, baseS);
++  EEPROM.get(CALIB_EEPROM_ADDR + 40, crcStored);
+ 
+-  // CRC8 over bytes 1..21 (wl + cmin + cmax = 21 bytes)
++  // CRC8 over bytes 1..39 (wl + cmin + cmax + lt + signs + gains = 39 bytes)
+   crcCalc = 0;
+   uint8_t* p;
+   p = (uint8_t*)&wl;                  for (int i = 0; i < 1;  i++) crcCalc = _crc8_update(crcCalc, p[i]);
+   p = (uint8_t*)cmin;                 for (int i = 0; i < 10; i++) crcCalc = _crc8_update(crcCalc, p[i]);
+   p = (uint8_t*)cmax;                 for (int i = 0; i < 10; i++) crcCalc = _crc8_update(crcCalc, p[i]);
++  p = (uint8_t*)&lt;                  for (int i = 0; i < 2;  i++) crcCalc = _crc8_update(crcCalc, p[i]);
++  p = (uint8_t*)&kpS;                 for (int i = 0; i < 4;  i++) crcCalc = _crc8_update(crcCalc, p[i]);
++  p = (uint8_t*)&kiS;                 for (int i = 0; i < 4;  i++) crcCalc = _crc8_update(crcCalc, p[i]);
++  p = (uint8_t*)&kdS;                 for (int i = 0; i < 4;  i++) crcCalc = _crc8_update(crcCalc, p[i]);
++  p = (uint8_t*)&baseS;               for (int i = 0; i < 2;  i++) crcCalc = _crc8_update(crcCalc, p[i]);
++  crcCalc = _crc8_update(crcCalc, sl);
++  crcCalc = _crc8_update(crcCalc, sr);
+ 
+   if (crcCalc != crcStored) return false;   // CRC fail = treat as empty, never load garbage
++  // per-field range guards: a v1/v2 block could only get here by matching the
++  // v3 magic (impossible: 0xA5 != 0xA6), but these keep ANY corrupted/garbage
++  // block out regardless of what wrote it
++  if (lt < 0 || lt > 1023) return false;
++  if (sl != 1 && sl != 0xFF) return false;   // only +/-1 signs are legal
++  if (sr != 1 && sr != 0xFF) return false;
++  if (kpS < 0.0f || kpS > 20.0f) return false;
++  if (kiS < 0.0f || kiS > 5.0f) return false;
++  if (kdS < 0.0f || kdS > 50.0f) return false;
++  if (baseS < 0 || baseS > 255) return false;
+ 
+   // commit only after verification
+   white_line = (wl != 0);
++  lineThresh = lt;
++  SIGN_L = (int8_t)sl;
++  SIGN_R = (int8_t)sr;
++  kp = kpS;
++  ki = kiS;
++  kd = kdS;
++  baseSpeed = baseS;
+   for (int i = 0; i < NUM_SENSORS; i++) {
+     trs.calibratedMin[i] = cmin[i];
+     trs.calibratedMax[i] = cmax[i];
+@@ -282,21 +426,37 @@
+   return true;
+ }
+ 
+-// save current trs.calibratedMin/Max and white_line to EEPROM (explicit 'E' only)
++// save calibration, lineThresh, motor signs and PID gains to EEPROM (explicit 'E' only)
+ void calibrationSaveToEEPROM() {
+   EEPROM.put(CALIB_EEPROM_ADDR, CALIB_EEPROM_MAGIC);
+   uint8_t wl = white_line ? 1 : 0;
++  uint8_t sl = (uint8_t)SIGN_L;
++  uint8_t sr = (uint8_t)SIGN_R;
+   EEPROM.put(CALIB_EEPROM_ADDR + 1, wl);
+   for (int i = 0; i < NUM_SENSORS; i++) EEPROM.put(CALIB_EEPROM_ADDR + 2 + i * 2,  trs.calibratedMin[i]);
+   for (int i = 0; i < NUM_SENSORS; i++) EEPROM.put(CALIB_EEPROM_ADDR + 12 + i * 2, trs.calibratedMax[i]);
++  EEPROM.put(CALIB_EEPROM_ADDR + 22, lineThresh);
++  EEPROM.put(CALIB_EEPROM_ADDR + 24, sl);
++  EEPROM.put(CALIB_EEPROM_ADDR + 25, sr);
++  EEPROM.put(CALIB_EEPROM_ADDR + 26, kp);
++  EEPROM.put(CALIB_EEPROM_ADDR + 30, ki);
++  EEPROM.put(CALIB_EEPROM_ADDR + 34, kd);
++  EEPROM.put(CALIB_EEPROM_ADDR + 38, baseSpeed);
+ 
+-  // CRC8 over the same 21 bytes
++  // CRC8 over the same 39 bytes
+   uint8_t crc = 0;
+   uint8_t* p;
+   p = (uint8_t*)&wl;                  for (int i = 0; i < 1;  i++) crc = _crc8_update(crc, p[i]);
+   p = (uint8_t*)trs.calibratedMin;    for (int i = 0; i < 10; i++) crc = _crc8_update(crc, p[i]);
+   p = (uint8_t*)trs.calibratedMax;    for (int i = 0; i < 10; i++) crc = _crc8_update(crc, p[i]);
+-  EEPROM.put(CALIB_EEPROM_ADDR + 22, crc);
++  p = (uint8_t*)&lineThresh;          for (int i = 0; i < 2;  i++) crc = _crc8_update(crc, p[i]);
++  p = (uint8_t*)&kp;                  for (int i = 0; i < 4;  i++) crc = _crc8_update(crc, p[i]);
++  p = (uint8_t*)&ki;                  for (int i = 0; i < 4;  i++) crc = _crc8_update(crc, p[i]);
++  p = (uint8_t*)&kd;                  for (int i = 0; i < 4;  i++) crc = _crc8_update(crc, p[i]);
++  p = (uint8_t*)&baseSpeed;           for (int i = 0; i < 2;  i++) crc = _crc8_update(crc, p[i]);
++  crc = _crc8_update(crc, sl);
++  crc = _crc8_update(crc, sr);
++  EEPROM.put(CALIB_EEPROM_ADDR + 40, crc);
+ }
+ 
+ // mark EEPROM calibration as invalid (explicit 'X' only)
+@@ -343,16 +503,15 @@
+   Serial.print(F("# DUMP_DONE rows=")); Serial.println(n);
+ }
+ 
+-/* ===== Stage 6: crossing detection ===== */
+-// After readError() has run this tick, sensorValues[] holds the PROCESSED calibrated
+-// values as left by readLine() (white_line applied). In that space "on line" is a
+-// HIGH reading (>300) - the same threshold the library itself uses for its on_line
+-// test, so this inherits the measured white_line and stays correct for either
+-// polarity found in stage 1. No re-read needed: the array is fresh from this tick.
++/* ===== Stage 6: crossing detection (raw-based, updated 2026-11-19) =====
++   readError() fills rawValues[] right before stateMachineStep() runs in the
++   same tick, so no re-read is needed. "On line" = raw BELOW lineThresh:
++   grey (~800) and white (~980) never count, the black line (~400) does -
++   same semantics as the old calibrated >300 test, same hold logic. */
+ bool isCrossing() {
+   uint8_t onLine = 0;
+   for (uint8_t i = 0; i < NUM_SENSORS; i++) {
+-    if (sensorValues[i] > 300) onLine++;
++    if ((int)rawValues[i] < lineThresh) onLine++;
+   }
+   return onLine >= CROSSING_THRESHOLD;
+ }
+@@ -544,6 +703,7 @@
+ /* ===== serial command line parsing (all stages) ===== */
+ static char lineBuf[24];
+ static uint8_t lineLen = 0;
++uint8_t dbgAll6 = 0;             // 'Z' debug: TLC6 dump + D11 idle reads (non-static: TRSensors.cpp weak-defaults it)
+ 
+ void handleLine(const char* buf) {
+   char cmd = buf[0];
+@@ -555,16 +715,21 @@
+ 
+   switch (cmd) {
+     case 'r':
++      if (dbgAll6) { Serial.print(F("D11 idle before=")); Serial.println(digitalRead(11)); }
+       trs.AnalogRead(rawValues);
++      if (dbgAll6) { Serial.print(F("D11 idle after=")); Serial.println(digitalRead(11)); }
+       printValues("RAW  : ", rawValues);
+       break;
++    case 'Z':
++      dbgAll6 = !dbgAll6;
++      Serial.print(F("TLC debug all-6 + D11 idle = ")); Serial.println(dbgAll6);
++      break;
+     case 'c':
+       trs.readCalibrated(sensorValues);
+       printValues("CAL  : ", sensorValues);
+       break;
+     case 'p': {
+-      trs.AnalogRead(rawValues);
+-      int e = readError();
++      int e = readError();   // raw-threshold path fills rawValues itself - print THAT read
+       Serial.print(F("POS raw="));
+       for (uint8_t i = 0; i < NUM_SENSORS; i++) {
+         Serial.print(rawValues[i]);
+@@ -574,6 +739,9 @@
+       Serial.print(F(" error="));   Serial.print(e);
+       Serial.print(F(" lost="));    Serial.print(lineLost(e) ? 1 : 0);
+       Serial.print(F(" side="));    Serial.println(e < 0 ? 'L' : (e > 0 ? 'R' : '?'));
++      Serial.print(F("thr="));      Serial.print(lineThresh);
++      Serial.print(F(" sumW>=30 required for linePos (lost sentinels -1/4001)"));
++      Serial.println();
+       break;
+     }
+     case 'd':
+@@ -645,8 +813,19 @@
+       Serial.print(F("smoothError=")); Serial.println(smoothError ? 1 : 0);
+       break;
+     case 't':
+-      trace = !trace;
+-      Serial.print(F("trace=")); Serial.println(trace ? 1 : 0);
++      // t<val> sets the raw threshold; bare t keeps the trace toggle (same
++      // digit/- split as d vs d<val>)
++      if (argIsNumber) {
++        int v = atoi(arg);
++        if (v < 0) v = 0;          // 0 = every sensor weighs -> meaningless, refuse
++        if (v > 1023) v = 1023;    // above ADC max = nothing is dark -> always lost
++        lineThresh = v;
++        Serial.print(F("lineThresh=")); Serial.println(lineThresh);
++        Serial.println(F("verify with p: black ~400 grey ~800 white ~980"));
++      } else {
++        trace = !trace;
++        Serial.print(F("trace=")); Serial.println(trace ? 1 : 0);
++      }
+       break;
+     case 'R':
+       record = !record;
+@@ -663,6 +842,7 @@
+       white_line = !white_line;
+       Serial.print(F("white_line=")); Serial.println(white_line ? 1 : 0);
+       Serial.println(F("re-check with 'p': line right of centre must give side=R"));
++      Serial.println(F("keep after reset: send E (saves polarity with calibration)"));
+       break;
+     case 'S':
+       searchEnabled = !searchEnabled;
+@@ -737,6 +917,10 @@
+       Serial.print(F("  loop: periodMs=")); Serial.print(LOOP_PERIOD_MS);
+       Serial.print(F(" dt_avg=")); Serial.print(lastDtAvg);
+       Serial.print(F(" over=")); Serial.println(lastOver);
++      Serial.print(F("  line: lineThresh=")); Serial.print(lineThresh);
++      Serial.print(F(" white_line=")); Serial.println(white_line ? 1 : 0);
++      Serial.print(F("  motors: sign_l=")); Serial.print(SIGN_L);
++      Serial.print(F(" sign_r=")); Serial.println(SIGN_R);
+       Serial.print(F("  state: state="));
+       Serial.print(state == FOLLOWING ? F("FOLLOWING") : F("SEARCHING"));
+       Serial.print(F(" side="));
+@@ -744,6 +928,21 @@
+       Serial.print(F(" searchElapsed="));
+       Serial.println(state == SEARCHING ? millis() - searchStartTime : 0);
+       break;
++    case 'M':
++      // motor self-test: wheels lifted, no sensors/PID/search involved
++      if (driving && !dryRun) { Serial.println(F("REFUSED - send s first")); break; }
++      motorSelfTest();
++      break;
++    case 'j':
++      SIGN_L = -SIGN_L;
++      Serial.print(F("sign_l=")); Serial.println(SIGN_L);
++      Serial.println(F("re-test with M; keep after reset: send E"));
++      break;
++    case 'J':
++      SIGN_R = -SIGN_R;
++      Serial.print(F("sign_r=")); Serial.println(SIGN_R);
++      Serial.println(F("re-test with M; keep after reset: send E"));
++      break;
+     case 'W':
+       // refuse a warmup while the wheels are live - a 10 s blind drive is not a demo
+       if (driving && !dryRun) { Serial.println(F("REFUSED - send s first")); break; }
+@@ -769,12 +968,14 @@
+       break;
+     case 'h':
+       Serial.println(F("Cmds: r c p d=g-toggle-dryrun g=go(+y) s=stop"));
++      Serial.println(F("      Z=TLC-debug: dump all 6 internal values + D11 idle state"));
+       Serial.println(F("      k<val>=kp i<val>=ki d<val>=kd b<val>=base l<val>=iLimit"));
+-      Serial.println(F("      m=toggle-smoothing t=toggle-trace R=toggle-record D=dump-buffer"));
++      Serial.println(F("      m=toggle-smoothing t=toggle-trace t<val>=lineThresh R=toggle-record D=dump-buffer"));
+       Serial.println(F("      z=pidReset h=help"));
+       Serial.println(F("State cmds: S=toggle-search-enabled Q=state F=force-search"));
+       Serial.println(F("  Search params: a<val>=spinSpeed T<val>=timeoutMs n<val>=foundNeeded"));
+-      Serial.println(F("Stage 6: x=toggle-crossing-handling C=print-config W=warmup-calibrate"));
++      Serial.println(F("Stage 6: x=toggle-crossing-handling C=print-config W=warmup-calibrate w=flip-white-line"));
++      Serial.println(F("Motors: M=self-test  j=flip-sign-L  J=flip-sign-R  (verify with M, save with E)"));
+       Serial.println(F("EEPROM: E=save-cal  L=load-cal  X=clear-cal"));
+       break;
+     case '\r':
+@@ -824,6 +1025,9 @@
+ 
+   Serial.begin(SERIAL_BAUD);
+ 
++  Serial.println(F("[BOOT] LAB2 firmware ready"));
++  Serial.print(F("D11 idle at boot=")); Serial.println(digitalRead(11));   // fault hunt: TLC1543 DATA line, no clocking yet
++  Serial.println(F("baud=9600 cmds: c e s x v r k#.# i#.# d#.# b# p#"));
+   Serial.println(F("LAB2 Stage 6 - test track"));
+ 
+   // EEPROM persistence (Option A): try the saved calibration first; only if it is
+@@ -845,11 +1049,12 @@
+ 
+   Serial.println(F("Cmds: r c p d=g-toggle-dryrun g=go(+y) s=stop"));
+   Serial.println(F("      k<val>=kp i<val>=ki d<val>=kd b<val>=base l<val>=iLimit"));
+-  Serial.println(F("      m=toggle-smoothing t=toggle-trace R=toggle-record D=dump-buffer"));
++  Serial.println(F("      m=toggle-smoothing t=toggle-trace t<val>=lineThresh R=toggle-record D=dump-buffer"));
+   Serial.println(F("      z=pidReset h=help"));
+   Serial.println(F("State cmds: S=toggle-search-enabled Q=state F=force-search"));
+   Serial.println(F("  Search params: a<val>=spinSpeed T<val>=timeoutMs n<val>=foundNeeded"));
+-  Serial.println(F("Stage 6: x=toggle-crossing-handling C=print-config W=warmup-calibrate"));
++  Serial.println(F("Stage 6: x=toggle-crossing-handling C=print-config W=warmup-calibrate w=flip-white-line"));
++  Serial.println(F("Motors: M=self-test  j=flip-sign-L  J=flip-sign-R  (verify with M, save with E)"));
+   Serial.println(F("EEPROM: E=save-cal  L=load-cal  X=clear-cal"));
+   Serial.print(F("state=FOLLOWING searchEnabled=")); Serial.println(searchEnabled ? 1 : 0);
+   Serial.print(F("dryRun=")); Serial.print(dryRun ? 1 : 0);
+@@ -859,6 +1064,11 @@
+   Serial.print(F(" base=")); Serial.print(baseSpeed);
+   Serial.print(F(" search=")); Serial.print(searchEnabled ? 1 : 0);
+   Serial.print(F(" smoothing=")); Serial.println(smoothError ? 1 : 0);
++  Serial.print(F(" white_line=")); Serial.print(white_line ? 1 : 0);
++  Serial.print(F(" lineThresh=")); Serial.println(lineThresh);
++  Serial.print(F("signs: sign_l=")); Serial.print(SIGN_L);
++  Serial.print(F(" sign_r=")); Serial.println(SIGN_R);
++  Serial.println(F("new robot? wheels up, send M, fix with j/J, then E to save"));
+   Serial.println(F("g starts in 3 s (s cancels) - k/i/d/b retune live"));
+   Serial.println(F("at the track: recalibrate with W under the target lighting"));
+ 
