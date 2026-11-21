@@ -172,12 +172,15 @@ qa = [
   "kd damps oscillation. kd = ____ gave ____ (with kd=1.0 the DRY output saturated at "
   "+-255 [HW]); the trade-off is D amplifying sensor noise."),
  ("4. Why did you choose that line-search strategy?",
-  "Spin toward the side where the line was last seen (readLine returns -1 / 4001 with the "
-  "modified library), N=3 consecutive good readings before committing, 3 s timeout that "
-  "stops the robot. Observed: ____."),
+  "I read the strip with readCalibrated() only and compute my own weighted average "
+  "(sum of i*1000*vi over sum of vi), error = position - 2000. Lost line = the SUM "
+  "of the polarity-corrected values drops below a threshold (no sensor sees the "
+  "line; no fake position is produced). The robot spins toward the side of the "
+  "last valid error, N=3 consecutive good readings before committing, 3 s timeout "
+  "that stops the robot. Observed: ____."),
  ("5. What does the controller do at a crossing, and why?",
-  "When >= 3 sensors see the line, u is frozen (lastGoodU) for 200 ms so the weighted "
-  "average cannot snap to the transverse stripe; observed: ____."),
+  "When >= 3 sensors have corrected values >= 300, u is frozen (lastGoodU) for "
+  "200 ms so the weighted average cannot snap to the transverse stripe; observed: ____."),
  ("6. What happens when one coefficient is changed?",
   "Raising kp: ____; raising kd: ____; adding ki: ____ (fill from live experiments)."),
 ]
@@ -186,18 +189,33 @@ for q, a in qa:
     doc.add_paragraph(a)
 
 # ---------- Section 8 ----------
-h("Section 8 - Library Knowledge (pre-written)")
+h("Section 8 - Line Position & Lost-Line Detection (pre-written, teacher-fixed design)")
 doc.add_paragraph(
-    "readLine() returns a weighted average in 0..4000 normally. When no sensor sees "
-    "the line it returns -1 (line last seen left of centre) or 4001 (last seen right) - "
-    "both from the modified TRSensors library (static last_value vs centre 2000). "
-    "After subtracting the 2000 setpoint these become -2001/+2001, outside +-2000, "
-    "which is exactly how lineLost() detects a lost line and derives the search side. "
-    "The manufacturer's original returned 0 or 4000, indistinguishable from 'line "
-    "under the outermost sensor', making lost-line detection impossible without extra code. "
-    "The unsigned-int trap: storing -1 in unsigned int yields 65535, the sign is destroyed.")
-note("Quote TRSensors.cpp lines 178-223 (readLine), 126-156 (readCalibrated), "
-     "84-123 (calibrate) - see library_explainer.md for the full annotated source.")
+    "Sensor input uses ONLY AnalogRead() (raw diagnostics) and readCalibrated() "
+    "(0..1000 per sensor, from the calibration extremes). readLine() is NOT used. "
+    "Line position is ONE number computed by my own weighted average over all 5 "
+    "polarity-corrected calibrated values: position = (0*v0 + 1000*v1 + 2000*v2 + "
+    "3000*v3 + 4000*v4) / (v0+v1+v2+v3+v4); error = position - 2000, so error 0 "
+    "means the line is centred under the strip. "
+    "Polarity is established by MEASUREMENT during calibration, not hard-coded: "
+    "after the sweep I compare the dark end (mean calibratedMin) with the bright "
+    "end (mean calibratedMax) of the per-sensor ranges. If the line reads LOW "
+    "calibrated values, each value is inverted (1000 - v) before averaging "
+    "(lineDarkFlag = true, saved to EEPROM). "
+    "Lost line: with polarity corrected, 'on line' is always the HIGH side, so the "
+    "SUM of the corrected values tells whether any sensor sees the line. "
+    "sum < lineLostSumMin (default 250, tuned on hardware with 'p' and 't<val>') = "
+    "lost: computePosition() reports lineVisible=false and returns NO position; "
+    "the controller keeps the last valid error so the search spins toward the side "
+    "where the line was last seen. "
+    "Why not readLine(): the library mixes 'position' and 'line lost' into one "
+    "return value (-1 / 4001 sentinels), which cannot be unit-tested and breaks "
+    "silently if stored in an unsigned int (65535, sign destroyed). My split - "
+    "position plus a separate visibility flag - is host-tested (pid_test.cpp, "
+    "tests 9-15: centred, far left/right, lost, inverted polarity, between sensors).")
+note("Quote my computePosition() from the sketch (Stage 2 section) and "
+     "readCalibrated() from TRSensors.cpp lines 126-156, calibrate() lines 84-123 - "
+     "see library_explainer.md for the full annotated source.")
 
 doc.save("observation_notebook.docx")
 print("saved observation_notebook.docx")

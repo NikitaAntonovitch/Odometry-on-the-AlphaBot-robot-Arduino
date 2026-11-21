@@ -3,8 +3,10 @@
 // // school results: kp=___ ki=___ kd=___ base=___ spin=___ timeout=___ foundNeeded=___
 //
 // stage map in this file:
-//   Stage 1: sensor + calibration (startup + 'W' warmup at the track)
-//   Stage 2: readError()/lineLost(), SIGNED int, white_line flip ('w')
+//   Stage 1: sensor + calibration + polarity measurement (startup + 'W' warmup)
+//   Stage 2: computePosition()/readError()/lineLost() - weighted average over
+//            readCalibrated values, sum-based lost line (teacher-fixed design,
+//            2026-11-21: no readLine, no raw thresholds, polarity by measurement)
 //   Stage 3: motor layer (LAB1 map + SIGN flip), clip-only applyCorrection, dead-man g+y
 //   Stage 4: hand-written PID + iLimit clamp, trace buffer (packed rows, F() strings)
 //   Stage 5: FOLLOWING<->SEARCHING state machine, spin search, timeout stop
@@ -19,11 +21,12 @@
 #include <EEPROM.h>
 
 /* ===== EEPROM calibration persistence (added post-stage-6) =====
-   Layout v3 (2026-11-20: signs + gains added; v2 2026-11-19: lineThresh).
+   Layout v4 (2026-11-21: teacher fix - sum lost-line + cal-based position).
    Address  Size  Content
    -------  ----  ---------------------------------
-   0        1     MAGIC = 0xA6  (v3; any other value = no valid data)
-   1        1     white_line (0 or 1, as unsigned char; inert since raw-path change)
+   0        1     MAGIC = 0xA7  (v4; any other value = no valid data)
+   1        1     lineDarkFlag (1 = line reads LOW calibrated values -> invert;
+                  established by MEASUREMENT during calibration, not hard-coded)
    2        2     calibratedMin[0]  (unsigned int, little-endian)
    4        2     calibratedMin[1]
    6        2     calibratedMin[2]
@@ -34,7 +37,7 @@
    16       2     calibratedMax[2]
    18       2     calibratedMax[3]
    20       2     calibratedMax[4]
-   22       2     lineThresh (int, little-endian)
+   22       2     lineLostSumMin (int, little-endian; lost-line SUM threshold)
    24       1     SIGN_L (int8_t as u8: 0xFF = -1, 0x01 = +1)
    25       1     SIGN_R (same encoding)
    26       4     kp (float)
@@ -44,11 +47,11 @@
    40       1     CRC8 checksum (over bytes 1..39)
    -------------------------------
    Total: 41 bytes used, 983 bytes free on UNO (1024 byte EEPROM).
-   v1/v2 saves are rejected by the magic change (0xA5/23-25 B layouts never
-   match 0xA6) plus per-field range guards - never load garbage.
+   v1/v2/v3 saves are rejected by the magic change (0xA5/0xA6 layouts never
+   match 0xA7) plus per-field range guards - never load garbage.
    Writes happen ONLY on the explicit 'E' command (EEPROM ~100k cycles). */
 
-static const uint8_t  CALIB_EEPROM_MAGIC = 0xA6;   // layout v3 (2026-11-20)
+static const uint8_t  CALIB_EEPROM_MAGIC = 0xA7;   // layout v4 (2026-11-21)
 static const int      CALIB_EEPROM_ADDR  = 0;   // start address
 
 // Simple CRC8 (Polynomial 0x07, initial 0x00, no final XOR) - same as Dallas/Maxim 1-Wire CRC.
@@ -63,36 +66,45 @@ static uint8_t _crc8_update(uint8_t crc, uint8_t data) {
 static const unsigned long SERIAL_BAUD = 9600;    // baud MUST match monitor
 static const uint8_t NUM_SENSORS = 5;             // Stage 1
 static const int SETPOINT = 2000;                 // Stage 2
-static const int LOST_LIMIT = 2000;               // Stage 2
-// raw-ADC reference levels (measured 2026-11-19): black line ~400, grey floor
-// ~800, white stripe ~980. Threshold = midpoint black/grey -> grey and white
-// get ZERO weight, only the narrow black line drives the position.
-static const int BLACK_RAW = 400;
-static const int GREY_RAW  = 800;
-static int lineThresh = (BLACK_RAW + GREY_RAW) / 2;   // 600; live: t<val>, saved with E
-static const int LINE_LOST_MIN_WEIGHT = 30;   // sum of w below this = no line under strip
-static int lastGoodLinePos = 2000;            // direction memory for the lost-line sentinel
-// POLARITY (flipped 2026-11-19). Diagnostic that forced the flip: line under
-// sensor 3 (RIGHT of centre, raw 721 = darkest reading) was reported as
-// linePos=1680 LEFT - the weighted average was chasing the bright background
-// pixels, so the controller steered AWAY from the dark line into the white gap.
-// TRAPS - read before flipping this back:
-//  - TRSensors.cpp inverts every value (1000-value) when white_line is FALSE,
-//    even though its own header comment claims the opposite (doc-vs-code bug,
-//    good demo answer). On this robot the dark line reads LOW raw, so
-//    white_line=0 pointed AT the line (HW-verified 09-11) and white_line=1
-//    points at the background. If avoidance behaviour ever returns, flip back
-//    at runtime with 'w' and verify with 'p' (side must match the real side) -
-//    no recompile needed.
-//  - 'E' saves white_line into EEPROM byte 1 and setup() auto-loads it BEFORE
-//    the defaults print, so a saved value overrides this initializer on every
-//    boot (reflashing does NOT reset it). 'X' clears the block; 'W'+'E'
-//    re-saves with the polarity currently active.
-// 2026-11-19: readError() switched to the raw-threshold path (lineThresh) and
-// no longer calls trs.readLine(), so this flag no longer affects line position
-// or crossing detection. Kept (still saved by 'E') only for EEPROM byte-1
-// layout compatibility.
-static bool white_line = true;   // runtime flip: 'w'; persist across resets: 'E'
+// LOST_LIMIT kept for documentation only: in the teacher-fixed design the lost
+// line is a STATE (lineVisibleNow=false from the sum test), not an error range.
+// The error kept during a lost tick is by definition within +-2000.
+static const int LOST_LIMIT = 2000;               // Stage 2 (reference only)
+/* ===== line position, teacher-fixed design (2026-11-21) =====
+   Sensor input uses ONLY the two intended library calls:
+     trs.AnalogRead()       -> raw adc values 0..1023 (r command, diagnostics)
+     trs.readCalibrated()   -> per-sensor 0..1000 (1000 = darkest seen in calibration)
+   readLine() is NOT used and there are NO raw thresholds. Position is ONE
+   number computed by our own weighted average over the calibrated values:
+
+     position = (0*v0 + 1000*v1 + 2000*v2 + 3000*v3 + 4000*v4) / (v0+v1+v2+v3+v4)
+
+   error = position - SETPOINT, so error = 0 <=> line centred under the strip.
+   POLARITY BY MEASUREMENT, not hard-coded: during calibration the strip sweeps
+   line AND background, so each sensor has seen both. At the END of calibration
+   we compare the averaged calibrated reading over the background vs over the
+   line (calibrateAndMeasurePolarity()): if the LINE reads LOW we set
+   lineDarkFlag=true and invert every value (1000 - v) before averaging -
+   exactly what the library's own white_line argument would have done, but
+   visible and testable in OUR code. lineDarkFlag is saved to EEPROM ('E').
+   LOST LINE BY SUM: with polarity corrected, a sensor ON the line contributes
+   a HIGH value and the background contributes ~0, so the SUM of the corrected
+   values tells whether ANY sensor sees the line. sum < LINE_LOST_SUM_MIN =
+   lost -> computePosition() reports lineVisible=false and NO fake position
+   is produced; the caller keeps the last valid error for the search direction.
+   LINE_LOST_SUM_MIN and CROSSING_SUM_MIN are calibration-derived estimates -
+   NEEDS TUNING ON HARDWARE. */
+static bool lineDarkFlag = true;   // 1 = line reads LOW cal values -> invert (1000-v).
+                                   // Default matches this track (dark line, [HW 09-11]);
+                                   // re-established by MEASUREMENT at every calibration.
+static int lineLostSumMin = 250;   // sum of corrected values below this = lost.
+                                   // Estimate: one sensor on line ~ mid hundreds,
+                                   // noise floor ~ tens. NEEDS TUNING ON HARDWARE
+                                   // ('p' shows the sum, 't<val>' retunes it live).
+static int lastGoodError = 0;      // last valid (visible-line) error: kept through lost
+                                   // ticks so the search direction follows the last
+                                   // valid error, per the teacher requirement.
+static bool lineVisibleNow = false; // result of the latest computePosition() call
 
 static const int PWM_MAX = 255;                   // Stage 3
 static const int PWM_MIN = 85;                    // LAB1 dead band 75 + margin
@@ -128,18 +140,30 @@ static bool searchDisabledMsgDone = false;
 // ===== Stage 4: tunables + controller state =====
 static float kp = 0.25f;
 static float ki = 0.0f;
-static float kd = 0.3f;
+static float kd = 0.05f;   // unit: PWM per (error-count per SECOND) - D is per-second
+                           // since 21.11. Old per-tick kd=0.3 -> 15 PWM per count at
+                           // dt=20 ms, so 20-50 count residuals gave hundreds of PWM
+                           // and saturated the output. PLACEHOLDER - NEEDS TUNING ON
+                           // HARDWARE (start 0.02-0.1, raise until zigzag damps).
 static int   baseSpeed = 90;
 static float iLimit = 1000.0f;
-static bool  smoothError = true;
 static bool  driving = false;
 static bool  dryRun   = true;
 static bool  trace   = false;
 static bool  record  = false;
 
 static float integral = 0.0f;
-static int   prevError = 0;
-static int   smoothedError = 0;
+// D path: first-order low-pass on the MEASUREMENT (error; setpoint 2000 is
+// constant, so filtering the error IS filtering the measurement). D compares
+// consecutive FILTER outputs - never filtered-vs-raw: that mismatch (old
+// smoothedError vs prevError) spiked D by the full tracking lag, saturated u,
+// one wheel reversed and the robot spun even at kp=0.
+static float filteredError     = 0.0f;
+static float prevFilteredError = 0.0f;
+static const float PID_D_FILTER_ALPHA = 0.25f;   // tau = dt*(1-a)/a = 60 ms
+static const float PID_DT_SCALE = 1000.0f / (float)LOOP_PERIOD_MS;  // 50 = 1/0.02 s
+static bool filterSeeded = false; // false after reset: first tick seeds the filter
+                                  // with the raw error and outputs NO D (no cold kick)
 static unsigned long prevTickMs = 0;
 
 // ===== Stage 6: crossing bookkeeping =====
@@ -158,80 +182,158 @@ static int8_t SIGN_R = -1;   // current unit (both-wheels-fwd = rotation). Runti
                              // flip: 'j' left / 'J' right; save with 'E'; verify with 'M'
 
 TRSensors trs = TRSensors();
-unsigned int sensorValues[NUM_SENSORS];
-unsigned int rawValues[NUM_SENSORS];
-static int lastLinePos = 0;
+unsigned int sensorValues[NUM_SENSORS];   // calibrated 0..1000, then polarity-corrected by computePosition()
+unsigned int rawValues[NUM_SENSORS];      // raw adc, 'r' command diagnostics only
 static int lastU = 0;   // correction of THIS tick, for the trace row
 
-/* ===== Stage 2: measurement (raw-threshold path, replaced trs.readLine() 2026-11-19) =====
-   The track is a NARROW BLACK LINE on a WIDE WHITE STRIPE on GREY FLOOR. The
-   library's readLine() weighted average cannot separate "partly dark grey" from
-   "black line", so the robot centred on the white stripe. This path:
-   - weights ONLY dark readings: w = lineThresh - raw (black ~400 -> w ~200);
-     grey ~800 and white ~980 are above the threshold and contribute nothing
-   - same 0..4000 position scale, same error = linePos - SETPOINT convention
-   - calibration NOT used on this path (W/E/L/X still work, just unused here)
-   SIGNED int - never change this type, the lost-line sign depends on it. */
-int readError() {
-  trs.AnalogRead(rawValues);
+/* ===== Stage 2: measurement (teacher-fixed design, 2026-11-21) =====
+   The ONLY sensor calls in the whole sketch are AnalogRead (diagnostics)
+   and readCalibrated (this function). No readLine(), no raw thresholds.
+   computePosition() is the separate, testable weighted-average function:
+     position = (0*v0 + 1000*v1 + 2000*v2 + 3000*v3 + 4000*v4) / (v0+..+v4)
+   over the polarity-corrected calibrated values; lineVisible=false when the
+   corrected SUM is below LINE_LOST_SUM_MIN (no sensor sees the line) - no
+   fake position is returned in that case. readError() wraps it:
+     line visible  -> error = position - SETPOINT, lastGoodError updated
+     line lost     -> error = lastGoodError KEPT (search follows the last
+                      valid error and its sign; requirement 6), with
+                      lineVisibleNow=false telling the trace/state machine.
+   SIGNED int everywhere - never change this type. */
+long computePosition(bool &lineVisible) {
+  // ONE sensor read per call, from the intended library path only
+  trs.readCalibrated(sensorValues);
+
+  // POLARITY CORRECTION (measurement-decided, see the header block):
+  // lineDarkFlag=true means the LINE reads LOW -> invert every value
+  // (1000 - v) so "on line" is always the HIGH side before averaging.
   long sum = 0;
+  for (uint8_t i = 0; i < NUM_SENSORS; i++) {
+    int v = (int)sensorValues[i];
+    if (lineDarkFlag) v = 1000 - v;   // invert dark-line readings
+    if (v < 0) v = 0;                 // clamp: corrected values are 0..1000
+    sensorValues[i] = (unsigned int)v; // keep the corrected values for 'v'/crossing
+    sum += v;
+  }
+
+  // LOST LINE BY SUM (requirement 5): no sensor on the line = all corrected
+  // values ~0 = tiny sum. Separate case - NO position is computed.
+  if (sum < lineLostSumMin) {
+    lineVisible = false;
+    return -1;                        // "no data" marker, never used as a position
+  }
+
+  // THE weighted average over all 5 sensors (requirement 3): one number.
   long weighted = 0;
   for (uint8_t i = 0; i < NUM_SENSORS; i++) {
-    int w = lineThresh - (int)rawValues[i];   // dark sensor = big weight
-    if (w < 0) w = 0;                         // grey/white floor: zero weight
-    sum += w;
-    weighted += (long)w * (i * 1000);
+    weighted += (long)sensorValues[i] * ((long)i * 1000);
   }
-  if (sum < LINE_LOST_MIN_WEIGHT) {
-    // library sentinel convention kept: -1 last seen LEFT, 4001 last seen RIGHT,
-    // so lineLost() and the search-side derivation work unchanged
-    lastLinePos = (lastGoodLinePos < SETPOINT) ? -1 : 4001;
-  } else {
-    lastLinePos = (int)(weighted / sum);
-    lastGoodLinePos = lastLinePos;            // direction memory for the sentinel
+  lineVisible = true;
+  return weighted / sum;              // 0..4000, 2000 = line centred
+}
+
+int readError() {
+  bool visible = false;
+  long pos = computePosition(visible);
+  lineVisibleNow = visible;
+  if (!visible) {
+    // requirement 5+6: report lost, keep the last valid error so the search
+    // direction still follows the last valid error sign. lastGoodError starts
+    // at 0 and is ONLY updated on visible readings, never invented here.
+    return lastGoodError;
   }
-  return lastLinePos - SETPOINT;
+  int e = (int)(pos - SETPOINT);
+  lastGoodError = e;                  // direction memory for lost ticks
+  return e;
 }
 
 bool lineLost(int e) {
-  return e > LOST_LIMIT || e < -LOST_LIMIT;
+  // lost is now a STATE flag from computePosition, not an error-range test:
+  // the kept lastGoodError is by definition within +-2000, so a range test
+  // on it could never fire - we must consult lineVisibleNow instead.
+  (void)e;
+  return !lineVisibleNow;
 }
 
-/* ===== Stage 4: PID (unchanged) ===== */
+/* ===== Stage 4: PID (D fixed 2026-11-21) =====
+   (1) D expressed PER SECOND: d = kd * dfilt * PID_DT_SCALE, kd unit =
+       PWM per (count/s); u clamped to +-PWM_MAX here AND re-clamped per
+       wheel in applyCorrection() - motors never see more than 255.
+   (2) D on the MEASUREMENT through a first-order LPF (alpha 0.25):
+       calibration-residual noise (20-50 counts/tick) is attenuated BEFORE
+       differentiating instead of being amplified by kd*dt_scale. */
 void pidReset() {
   integral = 0.0f;
-  prevError = 0;
-  smoothedError = 0;
+  filteredError = 0.0f;
+  prevFilteredError = 0.0f;
+  filterSeeded = false;
   Serial.println(F("PIDRESET"));
 }
 
 int pidStep(int error) {
   float p = kp * (float)error;
 
-  // I: accumulate, then clamp - a lost-line stall would otherwise wind it up
-  integral += ki * (float)error;
-  if (integral >  iLimit) integral =  iLimit;
-  if (integral < -iLimit) integral = -iLimit;
-
-  // D: raw by default; IIR 3/4 old + 1/4 new when smoothing is on
-  int errForD = error;
-  if (smoothError) {
-    smoothedError = (3 * smoothedError + error) / 4;
-    errForD = smoothedError;
+  // first-order LPF on the measurement; seeded on the first tick after a
+  // reset (filt = raw, d = 0) so the initial error is never mistaken for a
+  // fast change - without the seed, e.g. e=1000 at start gives a 625 PWM
+  // D kick (0.05*250*50) and saturates the output for 1-2 ticks
+  float d = 0.0f;
+  if (!filterSeeded) {
+    filteredError = (float)error;
+    prevFilteredError = filteredError;
+    filterSeeded = true;
+  } else {
+    filteredError += PID_D_FILTER_ALPHA * ((float)error - filteredError);
+    // D per second, between consecutive FILTER outputs only
+    d = kd * (filteredError - prevFilteredError) * PID_DT_SCALE;
+    prevFilteredError = filteredError;
   }
-  float d = kd * (float)(errForD - prevError);
 
-  prevError = error;
+  /* ANTI-WINDUP (21.11: ki=0.001 + clamp -> robot in DRIVING but frozen).
+     The I term kept integrating while the output sat pinned at the clamp
+     limit: u stuck at one rail is indistinguishable from "no correction
+     left to make" for the wheels, so with |u| pinned for a while the robot
+     entered DRIVING and did not move. Conditional integration (clamp check
+     FIRST, integrate only when it would not push further into the rail):
+       - unclamped, or pushed AWAY from the rail -> integrate normally
+       - pushed INTO the same-sign rail -> skip (integrator holds)
+     This is the standard integrator-clamping scheme; a back-calculation
+     variant would need the real saturated output + ki*Tt, more state, and
+     the same effect here - the conditional form is easier to unit-test. */
+  float uPre = p + integral + d;
+  bool atPosRail = (uPre >= PWM_MAX);
+  bool atNegRail = (uPre <= -PWM_MAX);
+  bool windPos = atPosRail && (ki * (float)error > 0);
+  bool windNeg = atNegRail && (ki * (float)error < 0);
+  if (!windPos && !windNeg) {
+    integral += ki * (float)error;
+    if (integral >  iLimit) integral =  iLimit;   // iLimit stays as the hard cap
+    if (integral < -iLimit) integral = -iLimit;
+  }
 
   long u = (long)(p + integral + d);
-  if (u >  PWM_MAX) u =  PWM_MAX;
+  if (u >  PWM_MAX) u =  PWM_MAX;    // clamp BEFORE the motors (requirement 1)
   if (u < -PWM_MAX) u = -PWM_MAX;
   return (int)u;
 }
 
-/* ===== Stage 3: correction split (clip-only, unchanged) ===== */
-// line RIGHT -> error>0 -> u>0 -> L=base+u > R=base-u -> turns right, toward the line
-void applyCorrection(int u) {
+/* ===== Stage 3: correction split (clip-only) ===== */
+// SIGN FIX (bench 21.11): with the calibrated position path a POSITIVE raw u
+// steered AWAY from the line, so the correction is negated ONCE here at the
+// single point where it is applied to the motors. SIGN_L/SIGN_R are correct
+// (M self-test) and stay untouched.
+// After negation: error>0 -> applied u<0 -> L=base+u < R=base-u -> turns
+// toward the line. lastU/lastGoodU hold the RAW pidStep output; the trace
+// dump applies the same negation (L = base-u, R = base+u).
+// SATURATION CLAMP (bench 21.11 PM): |u| above baseSpeed used to request a
+// NEGATIVE inner wheel, and deadBandCompensate() turned that small negative
+// request into 85+ PWM in REVERSE -> pivot -> spin (observed at kp=0.08
+// base=90, and base<85). Clamped to +-baseSpeed: full correction = inner
+// wheel at exactly 0 (true stop), never reverse. Search spin intentionally
+// bypasses this clamp (its own path, see applySearchMovement).
+void applyCorrection(int uIn) {
+  int u = -uIn;                       // the ONE sign flip (requirement 3)
+  if (u >  baseSpeed) u =  baseSpeed; // inner wheel stops, never reverses
+  if (u < -baseSpeed) u = -baseSpeed;
   int leftSpeed  = baseSpeed + u;
   int rightSpeed = baseSpeed - u;
 
@@ -260,14 +362,31 @@ void applyCorrection(int u) {
 }
 
 /* ===== Stage 3: motor layer (LAB1 pattern + floor-verified sign flip) ===== */
+/* ===== Dead-band compensation (requirement 4) =====
+   The motors cannot start below ~75 PWM (LAB1 measurement; PWM_MIN=85 with
+   margin). Requests 1..255 are remapped LINEARLY onto PWM_MIN..255 so small
+   PID corrections still move the wheels; 0 stays a TRUE stop (no creep).
+   Applied at the single point where PWM reaches the pins (motorL/motorR), so
+   drive, search spin AND the M self-test all get it. Values printed as
+   L/R/u elsewhere are REQUESTS - pre-compensation. */
+int deadBandCompensate(int pwm) {
+  if (pwm == 0) return 0;             // true stop (inner wheel at u=+-baseSpeed lands here)
+  int mag = abs(pwm);
+  if (mag > PWM_MAX) mag = PWM_MAX;
+  int mapped = PWM_MIN + ((PWM_MAX - PWM_MIN) * mag) / PWM_MAX;
+  return (pwm > 0) ? mapped : -mapped;
+}
+
 void motorL(int pwm) {
   pwm *= SIGN_L;
+  pwm = deadBandCompensate(pwm);      // 1..255 -> 85..255, 0 = stop
   digitalWrite(PIN_IN1, pwm >= 0);
   digitalWrite(PIN_IN2, pwm <  0);
   analogWrite(PIN_ENA, min(abs(pwm), PWM_MAX));
 }
 void motorR(int pwm) {
   pwm *= SIGN_R;
+  pwm = deadBandCompensate(pwm);      // 1..255 -> 85..255, 0 = stop
   digitalWrite(PIN_IN3, pwm <  0);
   digitalWrite(PIN_IN4, pwm >= 0);
   analogWrite(PIN_ENB, min(abs(pwm), PWM_MAX));
@@ -284,6 +403,13 @@ void motorsStop() {
   digitalWrite(PIN_IN3, LOW);
   digitalWrite(PIN_IN4, LOW);
 }
+
+/* ===== Search spin: SEPARATE raw path, bypasses the saturation clamp =====
+   A spin NEEDS opposite wheel directions (e.g. -120/+120); the +-baseSpeed
+   clamp in applyCorrection() exists to stop the DRIVE path from ever
+   reversing a wheel. applySearchMovement() therefore calls driveWheels()
+   directly (still through deadBandCompensate, which is fine: the spin speeds
+   are >= PWM_MIN-sized on both wheels, so no small-reverse amplification). */
 
 /* ===== 'M' motor self-test (no sensors, no PID, no search) =====
    Wheels lifted. ~1.5 s per step with a stop between.
@@ -341,6 +467,44 @@ void runCalibration() {
   }
 }
 
+/* ===== POLARITY BY MEASUREMENT (teacher requirement 4, 2026-11-21) =====
+   How it works: calibrate() has just stored per-sensor min/max over the sweep
+   (line AND background both seen). For each sensor the DARK end of its range
+   is calibratedMin (raw low = dark for this IR array) and the BRIGHT end is
+   calibratedMax. We average the darkness of the dark end vs the brightness of
+   the bright end across all 5 sensors:
+     darkAvg  = mean(calibratedMin[i])   <- what the LINE looks like (dark end)
+     brightAvg= mean(calibratedMax[i])   <- what the BACKGROUND looks like
+   If darkAvg < brightAvg the line reads LOW calibrated values -> after
+   readCalibrated the line is ~0 and background ~1000, so we must INVERT
+   (1000 - v) before averaging: lineDarkFlag = true.
+   If darkAvg > brightAvg (bright line on dark floor) -> no inversion.
+   Equal (bad/flat calibration, min==max everywhere) -> keep the previous flag
+   and warn: a flat calibration cannot decide polarity.
+   This is decided from DATA at every calibration, never hard-coded. */
+void measurePolarityFromCalibration() {
+  long darkAvg = 0, brightAvg = 0;
+  for (uint8_t i = 0; i < NUM_SENSORS; i++) {
+    darkAvg   += trs.calibratedMin[i];
+    brightAvg += trs.calibratedMax[i];
+  }
+  darkAvg   /= NUM_SENSORS;
+  brightAvg /= NUM_SENSORS;
+
+  Serial.print(F("POLARITY: dark-end avg=")); Serial.print(darkAvg);
+  Serial.print(F(" bright-end avg=")); Serial.print(brightAvg);
+
+  if (darkAvg == brightAvg) {
+    Serial.println(F(" -> FLAT calibration, flag KEPT (cannot decide)"));
+    return;
+  }
+  bool dark = (darkAvg < brightAvg);   // line darker than background?
+  lineDarkFlag = dark;
+  Serial.print(F(" -> lineDarkFlag="));
+  Serial.print(dark ? 1 : 0);
+  Serial.println(dark ? F(" (line LOW -> invert 1000-v)") : F(" (line HIGH -> no invert)"));
+}
+
 // Stage 6: warmup calibration at the track. Lighting differs across the room and the
 // battery sags during a session - recalibrate ON SITE right before the demo runs.
 // Allowed to block 10 s: the robot is stationary, wheels off, rotated by hand.
@@ -352,6 +516,7 @@ void warmupCalibrate() {
   Serial.println(F("CALIBRATION DONE"));
   printValues("MIN 0..4: ", trs.calibratedMin);
   printValues("MAX 0..4: ", trs.calibratedMax);
+  measurePolarityFromCalibration();   // requirement 4: polarity from measurement
   lastTick = millis();   // no catch-up tick burst after the 10 s block
   prevTickMs = 0;        // skip one dt sample
 }
@@ -383,7 +548,6 @@ bool calibrationLoadFromEEPROM() {
   EEPROM.get(CALIB_EEPROM_ADDR + 34, kdS);
   EEPROM.get(CALIB_EEPROM_ADDR + 38, baseS);
   EEPROM.get(CALIB_EEPROM_ADDR + 40, crcStored);
-
   // CRC8 over bytes 1..39 (wl + cmin + cmax + lt + signs + gains = 39 bytes)
   crcCalc = 0;
   uint8_t* p;
@@ -399,10 +563,10 @@ bool calibrationLoadFromEEPROM() {
   crcCalc = _crc8_update(crcCalc, sr);
 
   if (crcCalc != crcStored) return false;   // CRC fail = treat as empty, never load garbage
-  // per-field range guards: a v1/v2 block could only get here by matching the
-  // v3 magic (impossible: 0xA5 != 0xA6), but these keep ANY corrupted/garbage
-  // block out regardless of what wrote it
-  if (lt < 0 || lt > 1023) return false;
+  // per-field range guards: an old-layout block could only get here by matching
+  // the v4 magic (impossible: 0xA5/0xA6 != 0xA7), but these keep ANY
+  // corrupted/garbage block out regardless of what wrote it
+  if (lt < 0 || lt > 1000) return false;     // lost-sum threshold: sane range
   if (sl != 1 && sl != 0xFF) return false;   // only +/-1 signs are legal
   if (sr != 1 && sr != 0xFF) return false;
   if (kpS < 0.0f || kpS > 20.0f) return false;
@@ -411,8 +575,8 @@ bool calibrationLoadFromEEPROM() {
   if (baseS < 0 || baseS > 255) return false;
 
   // commit only after verification
-  white_line = (wl != 0);
-  lineThresh = lt;
+  lineDarkFlag = (wl != 0);           // v4 byte 1 = measured polarity flag
+  lineLostSumMin = lt;                // v4 offset 22 = lost-line sum threshold
   SIGN_L = (int8_t)sl;
   SIGN_R = (int8_t)sr;
   kp = kpS;
@@ -426,16 +590,17 @@ bool calibrationLoadFromEEPROM() {
   return true;
 }
 
-// save calibration, lineThresh, motor signs and PID gains to EEPROM (explicit 'E' only)
+// save calibration, polarity flag, lost-sum threshold, motor signs and PID gains
+// to EEPROM (explicit 'E' only)
 void calibrationSaveToEEPROM() {
   EEPROM.put(CALIB_EEPROM_ADDR, CALIB_EEPROM_MAGIC);
-  uint8_t wl = white_line ? 1 : 0;
+  uint8_t wl = lineDarkFlag ? 1 : 0;
   uint8_t sl = (uint8_t)SIGN_L;
   uint8_t sr = (uint8_t)SIGN_R;
   EEPROM.put(CALIB_EEPROM_ADDR + 1, wl);
   for (int i = 0; i < NUM_SENSORS; i++) EEPROM.put(CALIB_EEPROM_ADDR + 2 + i * 2,  trs.calibratedMin[i]);
   for (int i = 0; i < NUM_SENSORS; i++) EEPROM.put(CALIB_EEPROM_ADDR + 12 + i * 2, trs.calibratedMax[i]);
-  EEPROM.put(CALIB_EEPROM_ADDR + 22, lineThresh);
+  EEPROM.put(CALIB_EEPROM_ADDR + 22, lineLostSumMin);
   EEPROM.put(CALIB_EEPROM_ADDR + 24, sl);
   EEPROM.put(CALIB_EEPROM_ADDR + 25, sr);
   EEPROM.put(CALIB_EEPROM_ADDR + 26, kp);
@@ -449,7 +614,7 @@ void calibrationSaveToEEPROM() {
   p = (uint8_t*)&wl;                  for (int i = 0; i < 1;  i++) crc = _crc8_update(crc, p[i]);
   p = (uint8_t*)trs.calibratedMin;    for (int i = 0; i < 10; i++) crc = _crc8_update(crc, p[i]);
   p = (uint8_t*)trs.calibratedMax;    for (int i = 0; i < 10; i++) crc = _crc8_update(crc, p[i]);
-  p = (uint8_t*)&lineThresh;          for (int i = 0; i < 2;  i++) crc = _crc8_update(crc, p[i]);
+  p = (uint8_t*)&lineLostSumMin;      for (int i = 0; i < 2;  i++) crc = _crc8_update(crc, p[i]);
   p = (uint8_t*)&kp;                  for (int i = 0; i < 4;  i++) crc = _crc8_update(crc, p[i]);
   p = (uint8_t*)&ki;                  for (int i = 0; i < 4;  i++) crc = _crc8_update(crc, p[i]);
   p = (uint8_t*)&kd;                  for (int i = 0; i < 4;  i++) crc = _crc8_update(crc, p[i]);
@@ -503,15 +668,18 @@ void dumpBuffer() {
   Serial.print(F("# DUMP_DONE rows=")); Serial.println(n);
 }
 
-/* ===== Stage 6: crossing detection (raw-based, updated 2026-11-19) =====
-   readError() fills rawValues[] right before stateMachineStep() runs in the
-   same tick, so no re-read is needed. "On line" = raw BELOW lineThresh:
-   grey (~800) and white (~980) never count, the black line (~400) does -
-   same semantics as the old calibrated >300 test, same hold logic. */
+/* ===== Stage 6: crossing detection (calibrated-sum, teacher-fixed 2026-11-21) =====
+   computePosition() leaves the polarity-CORRECTED values in sensorValues[]
+   right before stateMachineStep() runs in the same tick, so no re-read is
+   needed. "On line" = corrected value HIGH (>= ON_LINE_CAL_MIN, i.e. 1000-v
+   if lineDarkFlag). Background corrects to ~0, the line to hundreds - so a
+   crossing stripe (line under several sensors at once) shows as several
+   sensors high simultaneously. Semantics of the old calibrated >300 test. */
+static const int ON_LINE_CAL_MIN = 300;   // corrected value above this = sensor on line
 bool isCrossing() {
   uint8_t onLine = 0;
   for (uint8_t i = 0; i < NUM_SENSORS; i++) {
-    if ((int)rawValues[i] < lineThresh) onLine++;
+    if ((int)sensorValues[i] >= ON_LINE_CAL_MIN) onLine++;
   }
   return onLine >= CROSSING_THRESHOLD;
 }
@@ -525,12 +693,15 @@ void blinkCrossingLed() {
   }
 }
 
-/* ===== Stage 5: search movement (unchanged) =====
+/* ===== Stage 5: search movement =====
    spin in place toward lastSeenSide - safest first choice: does not carry the robot
    away from where the line was lost; chosen over arc (wrong radius can miss) and
    reverse (needs path memory we do not have). KNOWN LIMITATION for the demo: a spin
    cannot find a line lost "ahead" (sharp bend taken on the outside) - the sweep never
-   crosses it; the timeout stop is the fallback in that case. */
+   crosses it; the timeout stop is the fallback in that case.
+   Calls driveWheels() DIRECTLY - deliberately bypasses the +-baseSpeed clamp of
+   applyCorrection(): a spin needs opposite wheel directions, which the clamp
+   would forbid. See the note above deadBandCompensate(). */
 void applySearchMovement(int side) {
   if (!driving || dryRun) {
     if (trace) {
@@ -729,19 +900,22 @@ void handleLine(const char* buf) {
       printValues("CAL  : ", sensorValues);
       break;
     case 'p': {
-      int e = readError();   // raw-threshold path fills rawValues itself - print THAT read
-      Serial.print(F("POS raw="));
+      // one full diagnostic read through the SAME path the control loop uses
+      int e = readError();            // fills sensorValues with corrected values
+      Serial.print(F("POS cal="));
       for (uint8_t i = 0; i < NUM_SENSORS; i++) {
-        Serial.print(rawValues[i]);
+        Serial.print(sensorValues[i]);   // polarity-CORRECTED 0..1000
         if (i < NUM_SENSORS - 1) Serial.print(',');
       }
-      Serial.print(F(" linePos=")); Serial.print(lastLinePos);
+      long sum = 0;
+      for (uint8_t i = 0; i < NUM_SENSORS; i++) sum += sensorValues[i];
+      Serial.print(F(" sum="));     Serial.print(sum);
       Serial.print(F(" error="));   Serial.print(e);
-      Serial.print(F(" lost="));    Serial.print(lineLost(e) ? 1 : 0);
+      Serial.print(F(" visible=")); Serial.print(lineVisibleNow ? 1 : 0);
       Serial.print(F(" side="));    Serial.println(e < 0 ? 'L' : (e > 0 ? 'R' : '?'));
-      Serial.print(F("thr="));      Serial.print(lineThresh);
-      Serial.print(F(" sumW>=30 required for linePos (lost sentinels -1/4001)"));
-      Serial.println();
+      Serial.print(F("polarity lineDark=")); Serial.print(lineDarkFlag ? 1 : 0);
+      Serial.print(F(" lostSumMin=")); Serial.print(lineLostSumMin);
+      Serial.println(F(" (sum<lostSumMin = lost, no position)"));
       break;
     }
     case 'd':
@@ -809,19 +983,20 @@ void handleLine(const char* buf) {
       iLimit = atof(arg); Serial.print(F("iLimit=")); Serial.println(iLimit, 1);
       break;
     case 'm':
-      smoothError = !smoothError;
-      Serial.print(F("smoothError=")); Serial.println(smoothError ? 1 : 0);
+      // D smoothing is now ALWAYS on (LPF on the measurement, alpha 0.25);
+      // 'm' just reports it. Kept so old command habits don't hit "?".
+      Serial.println(F("D smoothing always on: LPF alpha=0.25 on measurement"));
       break;
     case 't':
-      // t<val> sets the raw threshold; bare t keeps the trace toggle (same
-      // digit/- split as d vs d<val>)
+      // t<val> sets the lost-line SUM threshold (corrected-value sum, 0..5000);
+      // bare t keeps the trace toggle (same digit/- split as d vs d<val>)
       if (argIsNumber) {
         int v = atoi(arg);
-        if (v < 0) v = 0;          // 0 = every sensor weighs -> meaningless, refuse
-        if (v > 1023) v = 1023;    // above ADC max = nothing is dark -> always lost
-        lineThresh = v;
-        Serial.print(F("lineThresh=")); Serial.println(lineThresh);
-        Serial.println(F("verify with p: black ~400 grey ~800 white ~980"));
+        if (v < 0) v = 0;          // 0 = never lost -> meaningless, refuse
+        if (v > 5000) v = 5000;    // 5 sensors x 1000 = max possible sum
+        lineLostSumMin = v;
+        Serial.print(F("lineLostSumMin=")); Serial.println(lineLostSumMin);
+        Serial.println(F("verify with p: sum over line >> sum over background"));
       } else {
         trace = !trace;
         Serial.print(F("trace=")); Serial.println(trace ? 1 : 0);
@@ -839,10 +1014,12 @@ void handleLine(const char* buf) {
       pidReset();
       break;
     case 'w':
-      white_line = !white_line;
-      Serial.print(F("white_line=")); Serial.println(white_line ? 1 : 0);
+      // manual polarity override for bench experiments ONLY: normal operation
+      // sets lineDarkFlag by measurement at every calibration (requirement 4)
+      lineDarkFlag = !lineDarkFlag;
+      Serial.print(F("lineDarkFlag=")); Serial.println(lineDarkFlag ? 1 : 0);
       Serial.println(F("re-check with 'p': line right of centre must give side=R"));
-      Serial.println(F("keep after reset: send E (saves polarity with calibration)"));
+      Serial.println(F("keep after reset: send E (saves polarity) - W re-measures it"));
       break;
     case 'S':
       searchEnabled = !searchEnabled;
@@ -862,7 +1039,12 @@ void handleLine(const char* buf) {
       Serial.print(F(" foundCount=")); Serial.print(searchFoundCount);
       Serial.print(F(" elapsedMs="));
       Serial.print(state == SEARCHING ? millis() - searchStartTime : 0);
-      Serial.print(F(" timeoutMs=")); Serial.println(searchTimeoutMs);
+      Serial.print(F(" timeoutMs=")); Serial.print(searchTimeoutMs);
+      // drive-path gate: wheels only move when BOTH are true (verified from
+      // the serial link - a frozen robot with driving=1/dryRun=1 is gated,
+      // not stalled)
+      Serial.print(F(" driving=")); Serial.print(driving ? 1 : 0);
+      Serial.print(F(" dryRun=")); Serial.println(dryRun ? 1 : 0);
       break;
     }
     case 'F':
@@ -906,7 +1088,7 @@ void handleLine(const char* buf) {
       Serial.print(F(" kd=")); Serial.print(kd, 3);
       Serial.print(F(" base=")); Serial.print(baseSpeed);
       Serial.print(F(" iLimit=")); Serial.print(iLimit, 1);
-      Serial.print(F(" smoothError=")); Serial.println(smoothError ? 1 : 0);
+      Serial.print(F(" Dfilter alpha=")); Serial.println(PID_D_FILTER_ALPHA);
       Serial.print(F("  search: enabled=")); Serial.print(searchEnabled ? 1 : 0);
       Serial.print(F(" spin=")); Serial.print(searchSpinSpeed);
       Serial.print(F(" timeoutMs=")); Serial.print(searchTimeoutMs);
@@ -917,8 +1099,8 @@ void handleLine(const char* buf) {
       Serial.print(F("  loop: periodMs=")); Serial.print(LOOP_PERIOD_MS);
       Serial.print(F(" dt_avg=")); Serial.print(lastDtAvg);
       Serial.print(F(" over=")); Serial.println(lastOver);
-      Serial.print(F("  line: lineThresh=")); Serial.print(lineThresh);
-      Serial.print(F(" white_line=")); Serial.println(white_line ? 1 : 0);
+      Serial.print(F("  line: polarity lineDark=")); Serial.print(lineDarkFlag ? 1 : 0);
+      Serial.print(F(" lostSumMin=")); Serial.println(lineLostSumMin);
       Serial.print(F("  motors: sign_l=")); Serial.print(SIGN_L);
       Serial.print(F(" sign_r=")); Serial.println(SIGN_R);
       Serial.print(F("  state: state="));
@@ -970,11 +1152,11 @@ void handleLine(const char* buf) {
       Serial.println(F("Cmds: r c p d=g-toggle-dryrun g=go(+y) s=stop"));
       Serial.println(F("      Z=TLC-debug: dump all 6 internal values + D11 idle state"));
       Serial.println(F("      k<val>=kp i<val>=ki d<val>=kd b<val>=base l<val>=iLimit"));
-      Serial.println(F("      m=toggle-smoothing t=toggle-trace t<val>=lineThresh R=toggle-record D=dump-buffer"));
+      Serial.println(F("      m=toggle-smoothing t=toggle-trace t<val>=lostSumMin R=toggle-record D=dump-buffer"));
       Serial.println(F("      z=pidReset h=help"));
       Serial.println(F("State cmds: S=toggle-search-enabled Q=state F=force-search"));
       Serial.println(F("  Search params: a<val>=spinSpeed T<val>=timeoutMs n<val>=foundNeeded"));
-      Serial.println(F("Stage 6: x=toggle-crossing-handling C=print-config W=warmup-calibrate w=flip-white-line"));
+      Serial.println(F("Stage 6: x=toggle-crossing-handling C=print-config W=warmup-calibrate w=flip-polarity"));
       Serial.println(F("Motors: M=self-test  j=flip-sign-L  J=flip-sign-R  (verify with M, save with E)"));
       Serial.println(F("EEPROM: E=save-cal  L=load-cal  X=clear-cal"));
       break;
@@ -1045,15 +1227,16 @@ void setup() {
     Serial.println(F("CALIBRATION DONE"));
     printValues("MIN 0..4: ", trs.calibratedMin);
     printValues("MAX 0..4: ", trs.calibratedMax);
+    measurePolarityFromCalibration();   // requirement 4: polarity from measurement
   }
 
   Serial.println(F("Cmds: r c p d=g-toggle-dryrun g=go(+y) s=stop"));
   Serial.println(F("      k<val>=kp i<val>=ki d<val>=kd b<val>=base l<val>=iLimit"));
-  Serial.println(F("      m=toggle-smoothing t=toggle-trace t<val>=lineThresh R=toggle-record D=dump-buffer"));
+  Serial.println(F("      m=toggle-smoothing t=toggle-trace t<val>=lostSumMin R=toggle-record D=dump-buffer"));
   Serial.println(F("      z=pidReset h=help"));
   Serial.println(F("State cmds: S=toggle-search-enabled Q=state F=force-search"));
   Serial.println(F("  Search params: a<val>=spinSpeed T<val>=timeoutMs n<val>=foundNeeded"));
-  Serial.println(F("Stage 6: x=toggle-crossing-handling C=print-config W=warmup-calibrate w=flip-white-line"));
+  Serial.println(F("Stage 6: x=toggle-crossing-handling C=print-config W=warmup-calibrate w=flip-polarity"));
   Serial.println(F("Motors: M=self-test  j=flip-sign-L  J=flip-sign-R  (verify with M, save with E)"));
   Serial.println(F("EEPROM: E=save-cal  L=load-cal  X=clear-cal"));
   Serial.print(F("state=FOLLOWING searchEnabled=")); Serial.println(searchEnabled ? 1 : 0);
@@ -1063,9 +1246,9 @@ void setup() {
   Serial.print(F(" kd=")); Serial.print(kd, 3);
   Serial.print(F(" base=")); Serial.print(baseSpeed);
   Serial.print(F(" search=")); Serial.print(searchEnabled ? 1 : 0);
-  Serial.print(F(" smoothing=")); Serial.println(smoothError ? 1 : 0);
-  Serial.print(F(" white_line=")); Serial.print(white_line ? 1 : 0);
-  Serial.print(F(" lineThresh=")); Serial.println(lineThresh);
+  Serial.print(F(" Dfilter alpha=")); Serial.println(PID_D_FILTER_ALPHA);
+  Serial.print(F("line: polarity lineDark=")); Serial.print(lineDarkFlag ? 1 : 0);
+  Serial.print(F(" lostSumMin=")); Serial.println(lineLostSumMin);
   Serial.print(F("signs: sign_l=")); Serial.print(SIGN_L);
   Serial.print(F(" sign_r=")); Serial.println(SIGN_R);
   Serial.println(F("new robot? wheels up, send M, fix with j/J, then E to save"));
