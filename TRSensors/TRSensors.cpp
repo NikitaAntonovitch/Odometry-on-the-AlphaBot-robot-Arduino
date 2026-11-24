@@ -42,15 +42,22 @@ TRSensors::TRSensors()
 }
 
 
-// Reads the sensor values using TLC1543 ADC chip into an array. 
+// Reads the sensor values using TLC1543 ADC chip into an array.
 // The values returned are a measure of the reflectance in abstract units,
 // with higher values corresponding to lower reflectance (e.g. a black
 // surface or a void).
+uint8_t __attribute__((weak)) dbgAll6 = 0;   // LAB2 fault-hunt flag; stage6 overrides with a strong symbol
+
 void TRSensors::AnalogRead(unsigned int *sensor_values)
 {
 	char i,j;
 	unsigned int channel = 0;
 	unsigned int values[] = {0,0,0,0,0,0};
+
+	// LAB2 fault hunt: optional dump of all 6 raw slot values (j=0..5),
+	// to see what the chip actually returns before the values[i+1] shift.
+	// Weak flag: stage6 defines a strong dbgAll6 ('Z' toggles it); other
+	// sketches link against the weak default (0 = dump off).
 
 	for(j = 0;j < _numSensors + 1;j++)
 	{
@@ -77,6 +84,12 @@ void TRSensors::AnalogRead(unsigned int *sensor_values)
 			digitalWrite(Clock,LOW);
 		}
 		digitalWrite(CS,HIGH);
+	}
+
+	if (dbgAll6) {
+		Serial.print(F("TLC6:"));
+		for (char q = 0; q < 6; q++) { Serial.print(' '); Serial.print(values[q]); }
+		Serial.println();
 	}
 
 	for(i = 0;i < _numSensors;i++)
